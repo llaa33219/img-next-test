@@ -1,0 +1,2 @@
+/*
+  Content-Security-Policy: default-src * chrome-extension: 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * chrome-extension: data: blob:; media-src * chrome-extension: data: blob:;
