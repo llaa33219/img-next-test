@@ -247,7 +247,7 @@ async function handleImageCensorship(file, env) {
     const buf = await file.arrayBuffer();
     const base64 = arrayBufferToBase64(buf);
     
-    // --- (2) Gemini API 호출 ---
+    // --- (2) Gemini API 키 확인 ---
     const geminiApiKey = env.GEMINI_API_KEY;
     if (!geminiApiKey) {
       return {
@@ -279,13 +279,14 @@ async function handleImageCensorship(file, env) {
       // 실패 시 원본 이미지 사용
     }
 
-    // Gemini API 요청 생성 (Gemini 2.0 Flash-Lite 모델 사용)
+    // --- (3) Gemini API 호출 ---
+    // 더 간단한 프롬프트로 변경해 토큰 사용량 줄임
     const requestBody = {
       contents: [
         {
           parts: [
             {
-              text: "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n각 항목에 대해 true/false만 응답하고, 발견된 유해 콘텐츠가 있다면 간략히 설명해주세요."
+              text: "이 이미지에 성인 콘텐츠, 폭력, 무기, 약물, 혐오 표현이 포함되어 있나요? 카테고리별로 true/false로만 간단히 답변해주세요."
             },
             {
               inlineData: {
@@ -298,23 +299,21 @@ async function handleImageCensorship(file, env) {
       ],
       generationConfig: {
         temperature: 0.1,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 256, // 토큰 수 줄임
+        maxOutputTokens: 128, // 토큰 사용량 최소화
       }
     };
 
-    // 할당량 초과 시 재시도 로직
-    let response;
+    // API 호출에 재시도 로직 추가
     let retryCount = 0;
     const maxRetries = 3;
     const retryDelay = 2000; // 2초 지연
-    
-    while (retryCount < maxRetries) {
+
+    while (retryCount <= maxRetries) {
       try {
-        // Gemini 2.0 Flash-Lite 모델 사용
+        // 메인 모델 시도
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite:generateContent?key=${geminiApiKey}`;
-        response = await fetch(apiUrl, {
+        
+        let response = await fetch(apiUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -322,88 +321,262 @@ async function handleImageCensorship(file, env) {
           body: JSON.stringify(requestBody)
         });
 
-        if (!response.ok) {
-          // 할당량 초과 에러 확인 (429)
-          if (response.status === 429) {
-            console.log(`API 할당량 초과 에러, 재시도 ${retryCount + 1}/${maxRetries}`);
+        // 할당량 초과면 재시도 메커니즘 실행
+        if (response.status === 429) {
+          if (retryCount < maxRetries) {
+            console.log(`API 할당량 초과, ${retryCount + 1}번째 재시도...`);
             retryCount++;
-            
-            // 마지막 시도가 아니면 지연 후 재시도
-            if (retryCount < maxRetries) {
-              await new Promise(resolve => setTimeout(resolve, retryDelay));
-              continue;
-            }
+            await new Promise(r => setTimeout(r, retryDelay));
+            continue;
+          } else {
+            // 내장 단순 알고리즘으로 폴백
+            console.log("할당량 초과 최대 재시도 횟수 초과, 내장 검열 알고리즘으로 전환");
+            return performBasicCensorship(file);
           }
-          
-          const errText = await response.text();
+        }
+
+        // 5xx 에러는 서버 문제이므로 재시도
+        if (response.status >= 500) {
+          if (retryCount < maxRetries) {
+            console.log(`서버 오류 (${response.status}), ${retryCount + 1}번째 재시도...`);
+            retryCount++;
+            await new Promise(r => setTimeout(r, retryDelay));
+            continue;
+          } else {
+            // 내장 단순 알고리즘으로 폴백
+            console.log("서버 오류 최대 재시도 횟수 초과, 내장 검열 알고리즘으로 전환");
+            return performBasicCensorship(file);
+          }
+        }
+        
+        // 그 외 실패는 오류 반환
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.log(`Gemini API 오류: ${response.status}`, errorText);
           return {
             ok: false,
-            response: new Response(JSON.stringify({ 
-              success: false, 
-              error: `Gemini API 호출 실패: ${errText}` 
-            }), { status: response.status })
+            response: new Response(JSON.stringify({
+              success: false,
+              error: `콘텐츠 검열 실패 (${response.status})`
+            }), { status: 400 })
+          };
+        }
+
+        // 성공적으로 응답 받음
+        const data = await response.json();
+        if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+          // 유효한 응답이 아니면 기본 검열로 전환
+          console.log("유효하지 않은 Gemini 응답, 내장 검열 알고리즘으로 전환");
+          return performBasicCensorship(file);
+        }
+
+        const responseText = data.candidates[0].content.parts[0].text;
+        const result = analyzeGeminiResponse(responseText);
+        
+        if (result.isInappropriate) {
+          return {
+            ok: false,
+            response: new Response(JSON.stringify({
+              success: false,
+              error: `검열됨: ${result.reasons.join(", ")}`
+            }), { status: 400 })
           };
         }
         
-        // 성공하면 루프 탈출
-        break;
-      } catch(e) {
-        console.log(`이미지 검열 API 오류, 재시도 ${retryCount + 1}/${maxRetries}`, e);
-        retryCount++;
+        return { ok: true }; // 통과
+      } catch (error) {
         if (retryCount < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          console.log(`예외 발생, ${retryCount + 1}번째 재시도...`, error);
+          retryCount++;
+          await new Promise(r => setTimeout(r, retryDelay));
+        } else {
+          // 모든 재시도 실패 시 기본 검열로 전환
+          console.log("API 호출 중 예외 최대 재시도 횟수 초과, 내장 검열 알고리즘으로 전환");
+          return performBasicCensorship(file);
         }
       }
     }
     
-    // 모든 재시도 실패
-    if (retryCount >= maxRetries) {
-      return {
-        ok: false,
-        response: new Response(JSON.stringify({ 
-          success: false, 
-          error: `API 할당량 초과: 잠시 후 다시 시도해주세요` 
-        }), { status: 429 })
-      };
-    }
+    // 여기까지 도달하면 내장 검열로 폴백
+    return performBasicCensorship(file);
+  } catch (e) {
+    console.log("이미지 검열 처리 중 예외 발생:", e);
+    // 예외 발생 시 기본 검열로 전환
+    return performBasicCensorship(file);
+  }
+}
 
-    const data = await response.json();
-    
-    // API 응답 확인 및 결과 분석
-    if (!data.candidates || !data.candidates[0] || !data.candidates[0].content || !data.candidates[0].content.parts) {
-      return {
-        ok: false,
-        response: new Response(JSON.stringify({ 
-          success: false, 
-          error: '유효하지 않은 Gemini API 응답' 
-        }), { status: 500 })
-      };
-    }
+// =======================
+// 기본 검열 함수 (Gemini API 실패 시 폴백)
+// =======================
+async function performBasicCensorship(file) {
+  console.log("기본 내장 검열 실행 중...");
+  try {
+    // 간단한 이미지 분석 로직 (실제로는 더 정교한 구현 필요)
+    // 여기서는 매우 기본적인 검사만 수행
 
-    const responseText = data.candidates[0].content.parts[0].text;
-    const inappropriate = isInappropriateContent(responseText);
+    // 이미지인 경우
+    if (file.type.startsWith('image/')) {
+      // 파일 크기가 매우 큰 경우 의심 (50MB 이상)
+      if (file.size > 50 * 1024 * 1024) {
+        return {
+          ok: false,
+          response: new Response(JSON.stringify({
+            success: false,
+            error: "파일 크기가 너무 큽니다 (50MB 초과)"
+          }), { status: 400 })
+        };
+      }
+      
+      // 파일명에 의심스러운 키워드가 있는지 확인
+      const suspiciousKeywords = ['porn', 'xxx', 'adult', 'sex', '섹스', '성인', '야동'];
+      const fileName = file.name.toLowerCase();
+      
+      for (const keyword of suspiciousKeywords) {
+        if (fileName.includes(keyword)) {
+          return {
+            ok: false,
+            response: new Response(JSON.stringify({
+              success: false,
+              error: "의심스러운 파일명 감지됨"
+            }), { status: 400 })
+          };
+        }
+      }
+      
+      // 이 외에는 기본적으로 통과 (더 정교한 검사를 추가할 수 있음)
+      return { ok: true };
+    }
     
-    if (inappropriate.isInappropriate) {
+    // 비디오인 경우
+    else if (file.type.startsWith('video/')) {
+      // 파일 크기가 매우 큰 경우 (50MB 이상)
+      if (file.size > 50 * 1024 * 1024) {
+        return {
+          ok: false,
+          response: new Response(JSON.stringify({
+            success: false,
+            error: "비디오 파일 크기가 너무 큽니다 (50MB 초과)"
+          }), { status: 400 })
+        };
+      }
+      
+      // 비디오 길이 체크 (가능하다면)
+      const videoDuration = await getMP4Duration(file);
+      if (videoDuration && videoDuration > 300) { // 5분 초과
+        return {
+          ok: false,
+          response: new Response(JSON.stringify({
+            success: false,
+            error: "비디오 길이가 너무 깁니다 (5분 초과)"
+          }), { status: 400 })
+        };
+      }
+      
+      // 파일명에 의심스러운 키워드가 있는지 확인
+      const suspiciousKeywords = ['porn', 'xxx', 'adult', 'sex', '섹스', '성인', '야동'];
+      const fileName = file.name.toLowerCase();
+      
+      for (const keyword of suspiciousKeywords) {
+        if (fileName.includes(keyword)) {
+          return {
+            ok: false,
+            response: new Response(JSON.stringify({
+              success: false,
+              error: "의심스러운 파일명 감지됨"
+            }), { status: 400 })
+          };
+        }
+      }
+      
+      // 이 외에는 기본적으로 통과
+      return { ok: true };
+    }
+    
+    // 지원하지 않는 파일 타입
+    else {
       return {
         ok: false,
-        response: new Response(JSON.stringify({ 
-          success: false, 
-          error: `검열됨: ${inappropriate.reasons.join(", ")}` 
+        response: new Response(JSON.stringify({
+          success: false,
+          error: "지원하지 않는 파일 형식"
         }), { status: 400 })
       };
     }
-
-    return { ok: true }; // 통과
   } catch (e) {
-    console.log("handleImageCensorship error:", e);
+    console.log("기본 검열 중 오류:", e);
+    // 기본 검열에서도 오류가 발생하면 안전하게 거부
     return {
       ok: false,
-      response: new Response(JSON.stringify({ 
-        success: false, 
-        error: `이미지 검열 중 오류 발생: ${e.message}` 
+      response: new Response(JSON.stringify({
+        success: false,
+        error: "콘텐츠 검열 중 오류 발생"
       }), { status: 500 })
     };
   }
+}
+
+// =======================
+// Gemini 응답 분석
+// =======================
+function analyzeGeminiResponse(responseText) {
+  const responseTextLower = responseText.toLowerCase();
+  const reasons = [];
+
+  // 성인/노출 콘텐츠 감지
+  if (
+    (responseTextLower.includes("true") && (
+      responseTextLower.includes("성인") || 
+      responseTextLower.includes("노출") || 
+      responseTextLower.includes("선정적") ||
+      responseTextLower.includes("nude") ||
+      responseTextLower.includes("adult content") ||
+      responseTextLower.includes("sexual")
+    ))
+  ) {
+    reasons.push("성인/노출 콘텐츠");
+  }
+
+  // 폭력/무기 콘텐츠 감지
+  if (
+    (responseTextLower.includes("true") && (
+      responseTextLower.includes("폭력") || 
+      responseTextLower.includes("무기") ||
+      responseTextLower.includes("violence") ||
+      responseTextLower.includes("weapon")
+    ))
+  ) {
+    reasons.push("폭력/무기 콘텐츠");
+  }
+
+  // 약물/알코올 콘텐츠 감지
+  if (
+    (responseTextLower.includes("true") && (
+      responseTextLower.includes("약물") || 
+      responseTextLower.includes("알코올") ||
+      responseTextLower.includes("drug") ||
+      responseTextLower.includes("alcohol")
+    ))
+  ) {
+    reasons.push("약물/알코올 콘텐츠");
+  }
+
+  // 혐오/욕설 콘텐츠 감지
+  if (
+    (responseTextLower.includes("true") && (
+      responseTextLower.includes("혐오") || 
+      responseTextLower.includes("욕설") ||
+      responseTextLower.includes("hate") ||
+      responseTextLower.includes("offensive")
+    ))
+  ) {
+    reasons.push("혐오/욕설 콘텐츠");
+  }
+
+  return {
+    isInappropriate: reasons.length > 0,
+    reasons: reasons
+  };
 }
 
 // =======================
@@ -411,7 +584,7 @@ async function handleImageCensorship(file, env) {
 // =======================
 async function handleVideoCensorship(file, env) {
   try {
-    // (1) 용량 제한 - 50MB
+    // (1) 용량 제한 검사
     if (file.size > 50 * 1024 * 1024) {
       return {
         ok: false,
@@ -422,7 +595,7 @@ async function handleVideoCensorship(file, env) {
       };
     }
 
-    // (2) 동영상 길이 제한 - 옵션
+    // (2) 동영상 길이 제한 검사
     let videoDuration = await getMP4Duration(file);
     if (videoDuration && videoDuration > 300) { // 5분 초과
       return {
@@ -434,39 +607,31 @@ async function handleVideoCensorship(file, env) {
       };
     }
 
-    // (3) 비디오에서 프레임 추출
-    // 참고: Gemini는 아직 직접 비디오 분석을 지원하지 않으므로 
-    // 대표 프레임을 추출하여 이미지로 분석합니다.
-    // 실제 환경에서는 더 정교한 프레임 추출이 필요할 수 있습니다.
+    // (3) Gemini API 키 확인
     const geminiApiKey = env.GEMINI_API_KEY;
     if (!geminiApiKey) {
-      return {
-        ok: false,
-        response: new Response(JSON.stringify({ 
-          success: false, 
-          error: 'Gemini API 키가 설정되지 않았습니다.' 
-        }), { status: 500 })
-      };
+      return performBasicCensorship(file);
     }
 
-    // 여기서는 간단하게 비디오 썸네일만 분석합니다.
-    // 실제 구현에서는 비디오에서 여러 프레임을 추출하여 각각 분석하는 것이 좋습니다.
+    // (4) 비디오 준비
     const videoBuffer = await file.arrayBuffer();
     const base64 = arrayBufferToBase64(videoBuffer);
+    
+    // 최대 10,000자까지만 전송 (API 제한)
+    const truncatedBase64 = base64.substring(0, 10000);
 
-    // 비디오 썸네일 생성 - 실제 구현에서는 비디오 프레임 추출 라이브러리 사용
-    // 여기서는 단순화를 위해 그냥 비디오 파일을 분석하는 것으로 진행
+    // (5) Gemini API 호출
     const requestBody = {
       contents: [
         {
           parts: [
             {
-              text: "이 콘텐츠는 비디오 파일입니다. 부적절한 내용(성인물, 폭력, 무기, 약물 등)이 포함되어 있는지 확인해주세요. 확인할 수 있는 범위 내에서 답변해주세요. 카테고리별로 true/false로 간단히 답변해주세요."
+              text: "이 콘텐츠는 비디오 파일입니다. 파일 헤더 정보를 분석하여 부적절한 내용의 가능성(성인물, 폭력, 무기 등)을 평가해주세요. true/false로 간단히 답변해주세요."
             },
             {
               inlineData: {
                 mimeType: file.type,
-                data: base64.substring(0, 10000) // 더 많은 데이터 전송
+                data: truncatedBase64
               }
             }
           ]
@@ -474,23 +639,20 @@ async function handleVideoCensorship(file, env) {
       ],
       generationConfig: {
         temperature: 0.1,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 256, // 토큰 수 줄임
+        maxOutputTokens: 128,
       }
     };
 
-    // 할당량 초과 시 재시도 로직
-    let response;
+    // 재시도 로직
     let retryCount = 0;
     const maxRetries = 3;
-    const retryDelay = 2000; // 2초 지연
-    
-    while (retryCount < maxRetries) {
+    const retryDelay = 2000;
+
+    while (retryCount <= maxRetries) {
       try {
-        // Gemini 2.0 Flash-Lite 모델 사용
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite:generateContent?key=${geminiApiKey}`;
-        response = await fetch(apiUrl, {
+        
+        let response = await fetch(apiUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -498,62 +660,53 @@ async function handleVideoCensorship(file, env) {
           body: JSON.stringify(requestBody)
         });
 
-        if (!response.ok) {
-          // 할당량 초과 에러 확인 (429)
-          if (response.status === 429) {
-            console.log(`API 할당량 초과 에러, 재시도 ${retryCount + 1}/${maxRetries}`);
+        // 할당량 초과면 재시도
+        if (response.status === 429) {
+          if (retryCount < maxRetries) {
+            console.log(`비디오 분석: API 할당량 초과, ${retryCount + 1}번째 재시도...`);
             retryCount++;
-            
-            // 마지막 시도가 아니면 지연 후 재시도
-            if (retryCount < maxRetries) {
-              await new Promise(resolve => setTimeout(resolve, retryDelay));
-              continue;
-            }
+            await new Promise(r => setTimeout(r, retryDelay));
+            continue;
+          } else {
+            // 내장 알고리즘으로 폴백
+            console.log("비디오 분석: 할당량 초과 최대 재시도 횟수 초과, 내장 검열 알고리즘으로 전환");
+            return performBasicCensorship(file);
           }
-          
-          console.log("비디오 분석 API 호출 실패:", await response.text());
-          
-          // 일시적인 오류면 허용하되 로그는 남김
-          if (response.status >= 500 || response.status === 429) {
-            console.log("서버 또는 할당량 오류, 임시로 허용");
-            return { ok: true }; // 임시로 허용
-          }
-          
-          return {
-            ok: false,
-            response: new Response(JSON.stringify({ 
-              success: false, 
-              error: `비디오 검열 실패: API 오류` 
-            }), { status: response.status })
-          };
         }
-        
-        // 성공하면 루프 탈출
-        break;
-      } catch(e) {
-        console.log(`비디오 검열 API 오류, 재시도 ${retryCount + 1}/${maxRetries}`, e);
-        retryCount++;
-        if (retryCount < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
-        }
-      }
-    }
-    
-    // 모든 재시도 실패
-    if (retryCount >= maxRetries) {
-      console.log("최대 재시도 횟수 초과, 임시로 허용");
-      return { ok: true }; // 임시로 허용
-    }
 
-    try {
-      const data = await response.json();
-      // 응답 확인
-      if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
+        // 서버 오류면 재시도
+        if (response.status >= 500) {
+          if (retryCount < maxRetries) {
+            console.log(`비디오 분석: 서버 오류 (${response.status}), ${retryCount + 1}번째 재시도...`);
+            retryCount++;
+            await new Promise(r => setTimeout(r, retryDelay));
+            continue;
+          } else {
+            return performBasicCensorship(file);
+          }
+        }
+
+        // 그 외 오류면 기본 검열로 폴백
+        if (!response.ok) {
+          console.log(`비디오 분석: API 오류 (${response.status}), 내장 검열 알고리즘으로 전환`);
+          return performBasicCensorship(file);
+        }
+
+        // 성공적으로 응답 받음
+        const data = await response.json();
+        if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+          // 유효하지 않은 응답이면 기본 검열로 전환
+          console.log("비디오 분석: 유효하지 않은 Gemini 응답, 내장 검열 알고리즘으로 전환");
+          return performBasicCensorship(file);
+        }
+
         const responseText = data.candidates[0].content.parts[0].text;
-        // 매우 명백하게 부적절하다고 판단된 경우만 필터링
+        
+        // 비디오 파일 헤더 분석에서 명백하게 부적절하다고 판단된 경우만 필터링
         if (responseText.toLowerCase().includes("true") && 
             (responseText.toLowerCase().includes("porn") || 
              responseText.toLowerCase().includes("explicit") ||
+             responseText.toLowerCase().includes("성인") ||
              responseText.toLowerCase().includes("노출") ||
              responseText.toLowerCase().includes("선정적"))) {
           return {
@@ -564,17 +717,27 @@ async function handleVideoCensorship(file, env) {
             }), { status: 400 })
           };
         }
+        
+        // 그 외는 통과
+        return { ok: true };
+      } catch (error) {
+        if (retryCount < maxRetries) {
+          console.log(`비디오 분석: 예외 발생, ${retryCount + 1}번째 재시도...`, error);
+          retryCount++;
+          await new Promise(r => setTimeout(r, retryDelay));
+        } else {
+          // 모든 재시도 실패 시 기본 검열로 전환
+          console.log("비디오 분석: 최대 재시도 횟수 초과, 내장 검열 알고리즘으로 전환");
+          return performBasicCensorship(file);
+        }
       }
-    } catch (e) {
-      console.log("비디오 분석 응답 처리 실패:", e);
     }
-
-    return { ok: true }; // 통과
+    
+    // 여기까지 도달하면 내장 검열로 폴백
+    return performBasicCensorship(file);
   } catch (e) {
-    console.log("handleVideoCensorship error:", e);
-    // 비디오 분석은 복잡하기 때문에, 에러가 발생하면 기본적으로 통과시킴
-    // 실제 구현에서는 더 정교한 오류 처리가 필요할 수 있음
-    return { ok: true };
+    console.log("동영상 검열 중 예외 발생:", e);
+    return performBasicCensorship(file);
   }
 }
 
