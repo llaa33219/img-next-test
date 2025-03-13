@@ -279,7 +279,7 @@ async function handleImageCensorship(file, env) {
       // 실패 시 원본 이미지 사용
     }
 
-    // Gemini API 요청 생성
+    // Gemini API 요청 생성 (Gemini 2.0 Flash-Lite 모델 사용)
     const requestBody = {
       contents: [
         {
@@ -300,27 +300,70 @@ async function handleImageCensorship(file, env) {
         temperature: 0.1,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 1024,
+        maxOutputTokens: 256, // 토큰 수 줄임
       }
     };
 
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-vision:generateContent?key=${geminiApiKey}`;
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(requestBody)
-    });
+    // 할당량 초과 시 재시도 로직
+    let response;
+    let retryCount = 0;
+    const maxRetries = 3;
+    const retryDelay = 2000; // 2초 지연
+    
+    while (retryCount < maxRetries) {
+      try {
+        // Gemini 2.0 Flash-Lite 모델 사용
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite:generateContent?key=${geminiApiKey}`;
+        response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
 
-    if (!response.ok) {
-      const errText = await response.text();
+        if (!response.ok) {
+          // 할당량 초과 에러 확인 (429)
+          if (response.status === 429) {
+            console.log(`API 할당량 초과 에러, 재시도 ${retryCount + 1}/${maxRetries}`);
+            retryCount++;
+            
+            // 마지막 시도가 아니면 지연 후 재시도
+            if (retryCount < maxRetries) {
+              await new Promise(resolve => setTimeout(resolve, retryDelay));
+              continue;
+            }
+          }
+          
+          const errText = await response.text();
+          return {
+            ok: false,
+            response: new Response(JSON.stringify({ 
+              success: false, 
+              error: `Gemini API 호출 실패: ${errText}` 
+            }), { status: response.status })
+          };
+        }
+        
+        // 성공하면 루프 탈출
+        break;
+      } catch(e) {
+        console.log(`이미지 검열 API 오류, 재시도 ${retryCount + 1}/${maxRetries}`, e);
+        retryCount++;
+        if (retryCount < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        }
+      }
+    }
+    
+    // 모든 재시도 실패
+    if (retryCount >= maxRetries) {
       return {
         ok: false,
         response: new Response(JSON.stringify({ 
           success: false, 
-          error: `Gemini API 호출 실패: ${errText}` 
-        }), { status: response.status })
+          error: `API 할당량 초과: 잠시 후 다시 시도해주세요` 
+        }), { status: 429 })
       };
     }
 
@@ -418,12 +461,12 @@ async function handleVideoCensorship(file, env) {
         {
           parts: [
             {
-              text: "이 콘텐츠에 부적절한 내용이 포함되어 있는지 확인해주세요. 이것은 비디오 파일입니다. 파일 헤더만 분석하여 다음 카테고리에 해당하는 내용이 의심되면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 콘텐츠\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n비디오 콘텐츠를 직접 분석할 수 없으므로 파일 정보를 기반으로 평가해주세요."
+              text: "이 콘텐츠는 비디오 파일입니다. 부적절한 내용(성인물, 폭력, 무기, 약물 등)이 포함되어 있는지 확인해주세요. 확인할 수 있는 범위 내에서 답변해주세요. 카테고리별로 true/false로 간단히 답변해주세요."
             },
             {
               inlineData: {
                 mimeType: file.type,
-                data: base64.substring(0, 5000) // 헤더 부분만 전송
+                data: base64.substring(0, 10000) // 더 많은 데이터 전송
               }
             }
           ]
@@ -433,27 +476,75 @@ async function handleVideoCensorship(file, env) {
         temperature: 0.1,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 1024,
+        maxOutputTokens: 256, // 토큰 수 줄임
       }
     };
 
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-vision:generateContent?key=${geminiApiKey}`;
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(requestBody)
-    });
+    // 할당량 초과 시 재시도 로직
+    let response;
+    let retryCount = 0;
+    const maxRetries = 3;
+    const retryDelay = 2000; // 2초 지연
+    
+    while (retryCount < maxRetries) {
+      try {
+        // Gemini 2.0 Flash-Lite 모델 사용
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite:generateContent?key=${geminiApiKey}`;
+        response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
 
-    if (!response.ok) {
-      // 실제 비디오 분석은 어렵기 때문에, 기본적으로 허용하되
-      // 추후 더 정교한 비디오 분석 구현 필요
-      console.log("비디오 분석 API 호출 실패, 하지만 허용:", await response.text());
-      return { ok: true }; // 기본적으로 허용
+        if (!response.ok) {
+          // 할당량 초과 에러 확인 (429)
+          if (response.status === 429) {
+            console.log(`API 할당량 초과 에러, 재시도 ${retryCount + 1}/${maxRetries}`);
+            retryCount++;
+            
+            // 마지막 시도가 아니면 지연 후 재시도
+            if (retryCount < maxRetries) {
+              await new Promise(resolve => setTimeout(resolve, retryDelay));
+              continue;
+            }
+          }
+          
+          console.log("비디오 분석 API 호출 실패:", await response.text());
+          
+          // 일시적인 오류면 허용하되 로그는 남김
+          if (response.status >= 500 || response.status === 429) {
+            console.log("서버 또는 할당량 오류, 임시로 허용");
+            return { ok: true }; // 임시로 허용
+          }
+          
+          return {
+            ok: false,
+            response: new Response(JSON.stringify({ 
+              success: false, 
+              error: `비디오 검열 실패: API 오류` 
+            }), { status: response.status })
+          };
+        }
+        
+        // 성공하면 루프 탈출
+        break;
+      } catch(e) {
+        console.log(`비디오 검열 API 오류, 재시도 ${retryCount + 1}/${maxRetries}`, e);
+        retryCount++;
+        if (retryCount < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        }
+      }
+    }
+    
+    // 모든 재시도 실패
+    if (retryCount >= maxRetries) {
+      console.log("최대 재시도 횟수 초과, 임시로 허용");
+      return { ok: true }; // 임시로 허용
     }
 
-    // 파일 크기가 너무 크면 API가 분석하지 못할 수 있음
     try {
       const data = await response.json();
       // 응답 확인
