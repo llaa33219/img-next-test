@@ -247,7 +247,7 @@ async function handleUpload(request, env) {
 }
 
 // =======================
-// 동영상 검열 - Gemini API 사용 (파일 업로드 방식)
+// 동영상 검열 - Gemini API 사용 (청크 방식)
 // =======================
 async function handleVideoCensorship(file, env) {
   try {
@@ -285,175 +285,220 @@ async function handleVideoCensorship(file, env) {
         }), { status: 500 })
       };
     }
-
-    // (4) 파일 업로드 준비
-    const fileBuffer = await file.arrayBuffer();
-    const fileBlob = new Blob([fileBuffer], { type: file.type });
     
-    // (5) Gemini 파일 업로드 API 호출
-    try {
-      // 파일 업로드용 FormData 생성
-      const formData = new FormData();
-      formData.append('file', fileBlob, file.name || 'video.mp4');
+    // (4) 비디오 파일 데이터 준비
+    const videoBuffer = await file.arrayBuffer();
+    
+    // (5) 비디오 청크 전략 설정
+    const chunkStrategy = createVideoChunkingStrategy(videoBuffer.byteLength);
+    console.log(`비디오 분석 전략: ${chunkStrategy.numChunks}개 청크, 각 ${chunkStrategy.chunkSizeMB.toFixed(2)}MB`);
+    
+    // (6) 비디오 청크 생성
+    const chunks = createVideoChunks(videoBuffer, chunkStrategy.numChunks);
+    
+    // (7) 각 청크에 대해 Gemini API 호출
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const chunkBase64 = arrayBufferToBase64(chunk.data);
       
-      // 업로드 API 호출
-      const uploadResponse = await fetch(`https://generativelanguage.googleapis.com/v1/media:upload?key=${geminiApiKey}`, {
-        method: 'POST',
-        body: formData
-      });
-      
-      if (!uploadResponse.ok) {
-        const errorText = await uploadResponse.text();
-        console.log("파일 업로드 실패:", errorText);
-        return {
-          ok: false,
-          response: new Response(JSON.stringify({ 
-            success: false, 
-            error: `파일 업로드 실패: ${uploadResponse.status}` 
-          }), { status: uploadResponse.status })
-        };
+      // 청크 위치 설명 (시작, 중간, 끝 등)
+      let positionDesc = "";
+      if (i === 0) {
+        positionDesc = "시작 부분";
+      } else if (i === chunks.length - 1) {
+        positionDesc = "끝 부분";
+      } else {
+        const percentage = Math.round((chunk.position / videoBuffer.byteLength) * 100);
+        positionDesc = `${percentage}% 지점`;
       }
       
-      // 업로드 응답에서 파일 URI 추출
-      const uploadResult = await uploadResponse.json();
-      if (!uploadResult.uri) {
-        return {
-          ok: false,
-          response: new Response(JSON.stringify({ 
-            success: false, 
-            error: "파일 업로드 응답에 URI가 없습니다" 
-          }), { status: 500 })
-        };
-      }
+      console.log(`청크 ${i+1}/${chunks.length} 분석 중 (${positionDesc})`);
       
-      const fileUri = uploadResult.uri;
-      console.log("파일 업로드 성공, URI:", fileUri);
-      
-      // (6) 파일 처리 상태 확인 (옵션)
-      let fileActive = false;
-      let checkAttempts = 0;
-      const maxCheckAttempts = 5;
-      
-      while (!fileActive && checkAttempts < maxCheckAttempts) {
-        const fileStatusResponse = await fetch(`https://generativelanguage.googleapis.com/v1/media/${fileUri}?key=${geminiApiKey}`);
-        
-        if (fileStatusResponse.ok) {
-          const fileStatus = await fileStatusResponse.json();
-          if (fileStatus.state === "ACTIVE") {
-            fileActive = true;
-            console.log("파일 처리 완료됨");
-          } else if (fileStatus.state === "PROCESSING") {
-            console.log("파일 처리 중...");
-            await new Promise(resolve => setTimeout(resolve, 3000)); // 3초 대기
-          } else {
-            return {
-              ok: false,
-              response: new Response(JSON.stringify({ 
-                success: false, 
-                error: `파일 처리 실패: ${fileStatus.state}` 
-              }), { status: 500 })
-            };
-          }
-        } else {
-          console.log("파일 상태 확인 실패");
-          // 상태 확인 실패해도 계속 진행 (선택적)
-          fileActive = true;
-        }
-        
-        checkAttempts++;
-      }
-      
-      // (7) 비디오 콘텐츠 분석 요청
-      const contentAnalysisBody = {
+      // Gemini API 요청 준비
+      const requestBody = {
         contents: [
           {
             parts: [
               {
-                text: "이 비디오를 분석하고 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠"
+                text: `이 비디오의 ${positionDesc}을 분석해주세요. 부적절한 콘텐츠가 포함되어 있는지 확인하고 다음 항목에 대해 TRUE 또는 FALSE로 명확하게 답변해주세요:
+1. 노출/선정적 이미지:
+2. 폭력/무기:
+3. 약물/알코올:
+4. 욕설/혐오 표현:
+5. 기타 유해 콘텐츠:
+
+각 항목에 대해 명확하게 TRUE/FALSE로 먼저 답변한 후, 발견된 항목이 있다면 간략한 설명을 추가해주세요.`
               },
               {
-                fileData: {
+                inlineData: {
                   mimeType: file.type,
-                  fileUri: fileUri
+                  data: chunkBase64
                 }
               }
             ]
           }
         ],
         generationConfig: {
-          temperature: 0.1,
+          temperature: 0.2,
           topK: 40,
           topP: 0.95,
           maxOutputTokens: 512,
         }
       };
       
-      // 분석 요청 전송
-      const analysisResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${geminiApiKey}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(contentAnalysisBody)
-      });
+      // API 호출 (재시도 로직 포함)
+      let result = await callGeminiWithRetry(geminiApiKey, requestBody);
       
-      if (!analysisResponse.ok) {
-        const errorText = await analysisResponse.text();
-        console.log("콘텐츠 분석 실패:", errorText);
-        
-        // 일시적인 오류면 허용
-        if (analysisResponse.status >= 500) {
-          console.log("서버 오류, 임시로 허용");
-          return { ok: true };
-        }
-        
-        return {
-          ok: false,
-          response: new Response(JSON.stringify({ 
-            success: false, 
-            error: `비디오 분석 실패: ${analysisResponse.status}` 
-          }), { status: analysisResponse.status })
-        };
-      }
-      
-      // 분석 결과 처리
-      const analysisResult = await analysisResponse.json();
-      
-      if (analysisResult.candidates && 
-          analysisResult.candidates[0] && 
-          analysisResult.candidates[0].content && 
-          analysisResult.candidates[0].content.parts) {
-        
-        const responseText = analysisResult.candidates[0].content.parts[0].text;
-        console.log("분석 결과:", responseText);
-        
-        // 부적절한 콘텐츠 확인
-        const inappropriate = isInappropriateContent(responseText);
+      // 응답 분석
+      if (result && result.success) {
+        const inappropriate = isInappropriateContent(result.text);
         
         if (inappropriate.isInappropriate) {
           return {
             ok: false,
             response: new Response(JSON.stringify({ 
               success: false, 
-              error: `검열됨: ${inappropriate.reasons.join(", ")}` 
+              error: `검열됨 (${positionDesc}): ${inappropriate.reasons.join(", ")}` 
             }), { status: 400 })
           };
         }
+      } else if (result && !result.success) {
+        console.log(`청크 ${i+1} 분석 실패: ${result.error}`);
+        // 개별 청크 분석 실패는 무시하고 다음 청크로 진행
       }
-      
-      return { ok: true };
-      
-    } catch (uploadError) {
-      console.log("비디오 업로드/분석 오류:", uploadError);
-      
-      // 심각한 오류가 아니면 임시로 허용
-      return { ok: true };
     }
+    
+    // 모든 청크 검사 통과
+    return { ok: true };
   } catch (e) {
-    console.log("handleVideoCensorship 전체 오류:", e);
+    console.log("handleVideoCensorship 오류:", e);
     // 심각한 오류가 아니면 임시로 허용
     return { ok: true };
   }
+}
+
+// 비디오 청킹 전략 생성 함수
+function createVideoChunkingStrategy(videoSizeBytes) {
+  // 비디오 크기에 따라 최적의 청크 수 결정
+  let numChunks;
+  
+  if (videoSizeBytes <= 5 * 1024 * 1024) { // 5MB 이하
+    numChunks = 2; // 시작과 끝
+  } else if (videoSizeBytes <= 20 * 1024 * 1024) { // 20MB 이하
+    numChunks = 4; // 시작, 1/3, 2/3, 끝
+  } else {
+    numChunks = 6; // 더 큰 파일은 더 많은 청크로 분할
+  }
+  
+  // 청크당 최대 크기 제한 (MB) - Gemini API 제한 고려
+  const maxChunkSizeMB = 3;
+  const maxChunkSizeBytes = maxChunkSizeMB * 1024 * 1024;
+  
+  // 실제 청크 크기 계산
+  const idealChunkSize = Math.floor(videoSizeBytes / numChunks);
+  const chunkSize = Math.min(idealChunkSize, maxChunkSizeBytes);
+  
+  // 최종 필요한 청크 수 재계산
+  const actualNumChunks = Math.ceil(videoSizeBytes / chunkSize);
+  
+  return {
+    numChunks: actualNumChunks,
+    chunkSizeBytes: chunkSize,
+    chunkSizeMB: chunkSize / (1024 * 1024)
+  };
+}
+
+// 비디오 버퍼를 청크로 분할하는 함수
+function createVideoChunks(videoBuffer, numChunks) {
+  const chunks = [];
+  const totalSize = videoBuffer.byteLength;
+  
+  // 청크 간격을 균등하게 분배
+  // 청크 크기가 아닌 청크 위치를 균등 분배
+  for (let i = 0; i < numChunks; i++) {
+    // 청크 시작 위치 (균등 분배)
+    const position = Math.floor((i / (numChunks - 1)) * totalSize);
+    
+    // 청크 크기 (최대 3MB)
+    const maxChunkSize = 3 * 1024 * 1024;
+    const remainingSize = totalSize - position;
+    const chunkSize = Math.min(maxChunkSize, remainingSize);
+    
+    if (chunkSize <= 0) continue;
+    
+    // 청크 데이터 추출
+    const chunkData = new Uint8Array(videoBuffer.slice(position, position + chunkSize));
+    
+    chunks.push({
+      position: position,
+      data: chunkData.buffer,
+      size: chunkSize
+    });
+  }
+  
+  return chunks;
+}
+
+// Gemini API 호출 함수 (재시도 로직 포함)
+async function callGeminiWithRetry(apiKey, requestBody, maxRetries = 3) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+      
+      if (!response.ok) {
+        // 할당량 초과 에러 (429)
+        if (response.status === 429 && attempt < maxRetries - 1) {
+          console.log(`API 할당량 초과, 재시도 ${attempt + 1}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, 2000)); // 2초 대기
+          continue;
+        }
+        
+        // 다른 에러
+        const errorText = await response.text();
+        return {
+          success: false,
+          error: `API 오류 (${response.status}): ${errorText}`
+        };
+      }
+      
+      const data = await response.json();
+      
+      if (!data.candidates || !data.candidates[0] || !data.candidates[0].content || !data.candidates[0].content.parts) {
+        return {
+          success: false,
+          error: "유효하지 않은 API 응답 형식"
+        };
+      }
+      
+      return {
+        success: true,
+        text: data.candidates[0].content.parts[0].text
+      };
+    } catch (e) {
+      if (attempt < maxRetries - 1) {
+        console.log(`API 요청 실패, 재시도 ${attempt + 1}/${maxRetries}: ${e.message}`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      
+      return {
+        success: false,
+        error: `API 요청 예외: ${e.message}`
+      };
+    }
+  }
+  
+  return {
+    success: false,
+    error: "최대 재시도 횟수 초과"
+  };
 }
 // =======================
 // 부적절한 내용 분석 함수
