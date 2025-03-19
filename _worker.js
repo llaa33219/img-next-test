@@ -425,7 +425,7 @@ async function handleImageCensorship(file, env) {
 }
 
 // =======================
-// 동영상 검열 - Gemini API 사용 (개선된 방식)
+// 동영상 검열 - Gemini API 사용
 // =======================
 async function handleVideoCensorship(file, env) {
   try {
@@ -464,142 +464,158 @@ async function handleVideoCensorship(file, env) {
       };
     }
 
-    // (4) 비디오 데이터 준비 및 여러 세그먼트 샘플링
+    // 비디오 데이터 준비
     const videoBuffer = await file.arrayBuffer();
     const base64 = arrayBufferToBase64(videoBuffer);
-    
-    // 비디오를 여러 세그먼트로 나누기
+
+    // 개선된 비디오 세그먼트 추출 - 시작, 중간, 끝 부분
     const segments = [];
-    
-    // 비디오 길이에 따라 샘플링할 세그먼트 수 결정
-    const numSegments = videoDuration ? Math.min(3, Math.ceil(videoDuration / 60)) : 2;
     
     if (base64.length > 0) {
       // 시작 부분
-      const startSegmentSize = Math.min(base64.length, 8000);
-      segments.push(base64.substring(0, startSegmentSize));
+      const startSegmentSize = Math.min(base64.length, 5000);
+      segments.push({
+        label: "시작 부분",
+        data: base64.substring(0, startSegmentSize)
+      });
       
-      if (numSegments >= 2 && base64.length > 16000) {
-        // 중간 부분
-        const middleStart = Math.floor(base64.length / 2) - 4000;
-        const middleEnd = Math.min(middleStart + 8000, base64.length);
+      // 비디오가 충분히 크면 중간 부분도 추가
+      if (base64.length > 10000) {
+        const middleStart = Math.floor(base64.length / 2) - 2500;
+        const middleEnd = Math.min(middleStart + 5000, base64.length);
         if (middleStart >= 0 && middleEnd <= base64.length) {
-          segments.push(base64.substring(middleStart, middleEnd));
+          segments.push({
+            label: "중간 부분",
+            data: base64.substring(middleStart, middleEnd)
+          });
         }
       }
       
-      if (numSegments >= 3 && base64.length > 32000) {
-        // 끝 부분
-        const endStart = Math.max(0, base64.length - 8000);
-        segments.push(base64.substring(endStart));
+      // 비디오가 충분히 크면 끝 부분도 추가
+      if (base64.length > 15000) {
+        const endStart = Math.max(0, base64.length - 5000);
+        segments.push({
+          label: "끝 부분",
+          data: base64.substring(endStart)
+        });
       }
     }
     
     console.log(`비디오 분석: ${segments.length}개 세그먼트 샘플링됨`);
     
-    // (5) 각 비디오 세그먼트에 대해 검열 진행
-    for (let i = 0; i < segments.length; i++) {
-      const segment = segments[i];
-      const segmentLabel = i === 0 ? "시작 부분" : i === 1 ? "중간 부분" : "끝 부분";
-      console.log(`비디오 ${segmentLabel} 분석 중...`);
+    // 각 세그먼트 분석
+    for (const segment of segments) {
+      console.log(`비디오 ${segment.label} 분석 중...`);
       
-      // Gemini API 요청 준비
       const requestBody = {
         contents: [
           {
             parts: [
               {
-                text: `이 비디오의 ${segmentLabel}입니다. 부적절한 콘텐츠가 포함되어 있는지 검사해주세요. 다음 항목 중 하나라도 발견되면 해당 항목에 TRUE로 표시하고, 그렇지 않으면 FALSE로 표시해주세요.\n1. 노출/선정적 이미지:\n2. 폭력/무기:\n3. 약물/알코올:\n4. 욕설/혐오 표현:\n5. 기타 유해 콘텐츠:`
+                text: `이 비디오의 ${segment.label}입니다. 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n각 항목에 대해 true/false만 응답하고, 발견된 유해 콘텐츠가 있다면 간략히 설명해주세요.`
               },
               {
                 inlineData: {
                   mimeType: file.type,
-                  data: segment
+                  data: segment.data
                 }
               }
             ]
           }
         ],
         generationConfig: {
-          temperature: 0.2,
+          temperature: 0.1,
           topK: 40,
           topP: 0.95,
-          maxOutputTokens: 512,
+          maxOutputTokens: 256,
         }
       };
-      
+
       // 할당량 초과 시 재시도 로직
-      let response = null;
+      let response;
       let retryCount = 0;
       const maxRetries = 3;
+      const retryDelay = 2000; // 2초 지연
       
-      while (retryCount < maxRetries && !response) {
+      while (retryCount < maxRetries) {
         try {
           // Gemini 2.0 Flash-Lite 모델 사용
           const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${geminiApiKey}`;
-          const apiResponse = await fetch(apiUrl, {
+          response = await fetch(apiUrl, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json'
             },
             body: JSON.stringify(requestBody)
           });
-          
-          if (!apiResponse.ok) {
-            if (apiResponse.status === 429) {
-              // 할당량 초과, 재시도
-              console.log(`API 할당량 초과, 재시도 ${retryCount + 1}/${maxRetries}`);
+
+          if (!response.ok) {
+            // 할당량 초과 에러 확인 (429)
+            if (response.status === 429) {
+              console.log(`API 할당량 초과 에러, 재시도 ${retryCount + 1}/${maxRetries}`);
               retryCount++;
-              await new Promise(resolve => setTimeout(resolve, 2000)); // 2초 지연
-              continue;
-            } else {
-              // 다른 오류, 로그만 남기고 다음 세그먼트로
-              console.log(`API 오류 (${apiResponse.status}): ${await apiResponse.text()}`);
-              break;
+              
+              // 마지막 시도가 아니면 지연 후 재시도
+              if (retryCount < maxRetries) {
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                continue;
+              }
             }
+            
+            console.log(`비디오 분석 API 호출 실패: ${response.status}`);
+            // 하나의 세그먼트 분석 실패는 치명적이지 않음, 다음 세그먼트로 넘어감
+            break;
           }
           
-          // 성공적인 응답 처리
-          response = await apiResponse.json();
-        } catch (err) {
-          console.log(`API 요청 실패, 재시도 ${retryCount + 1}/${maxRetries}: ${err.message}`);
+          // 성공하면 루프 탈출
+          break;
+        } catch (e) {
+          console.log(`API 호출 중 오류 발생, 재시도 ${retryCount + 1}/${maxRetries}:`, e);
           retryCount++;
           
           if (retryCount < maxRetries) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            continue;
           }
+          
+          // 모든 재시도 실패, 다음 세그먼트로 넘어감
+          break;
         }
       }
       
-      // 응답 분석
-      if (response && response.candidates && 
-          response.candidates[0] && 
-          response.candidates[0].content && 
-          response.candidates[0].content.parts) {
-        
-        const responseText = response.candidates[0].content.parts[0].text;
-        console.log(`비디오 ${segmentLabel} 분석 결과:`, responseText);
-        
-        // 부적절한 내용 검사
-        const inappropriate = isInappropriateContent(responseText);
-        
-        if (inappropriate.isInappropriate) {
-          return {
-            ok: false,
-            response: new Response(JSON.stringify({ 
-              success: false, 
-              error: `검열됨 (${segmentLabel}): ${inappropriate.reasons.join(", ")}` 
-            }), { status: 400 })
-          };
+      // 응답 분석 (정상 응답을 받은 경우만)
+      if (response && response.ok) {
+        try {
+          const data = await response.json();
+          
+          if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
+            const responseText = data.candidates[0].content.parts[0].text;
+            console.log(`비디오 ${segment.label} 분석 결과:`, responseText);
+            
+            const inappropriate = isInappropriateContent(responseText);
+            
+            if (inappropriate.isInappropriate) {
+              return {
+                ok: false,
+                response: new Response(JSON.stringify({ 
+                  success: false, 
+                  error: `검열됨 (${segment.label}): ${inappropriate.reasons.join(", ")}` 
+                }), { status: 400 })
+              };
+            }
+          }
+        } catch (parseError) {
+          console.log("응답 파싱 중 오류:", parseError);
+          // 하나의 세그먼트 파싱 실패는 무시하고 계속 진행
         }
       }
     }
-    
-    // 모든 세그먼트 검사 통과
+
+    // 모든 세그먼트 검사 통과 (또는 실패했어도 심각한 오류는 아닌 경우)
     return { ok: true };
   } catch (e) {
-    console.log("handleVideoCensorship 오류:", e);
-    // 예상치 못한 오류 발생 시 임시로 허용
+    console.log("handleVideoCensorship error:", e);
+    // 오류가 발생했지만 업로드는 허용 (일시적인 API 오류)
     return { ok: true };
   }
 }
