@@ -1,9 +1,4 @@
 // ==============================
-// Import Google GenAI
-// ==============================
-import { GoogleGenAI, createUserContent, createPartFromUri } from "@google/genai";
-
-// ==============================
 // 전역: 중복 요청 관리 Map
 // ==============================
 const requestsInProgress = {};
@@ -222,7 +217,7 @@ async function handleUpload(request, env) {
 }
 
 // =======================
-// 이미지 검열 - Gemini API 사용 (Google GenAI 방식)
+// 이미지 검열 - Gemini API 직접 호출
 // =======================
 async function handleImageCensorship(file, env) {
   try {
@@ -237,38 +232,64 @@ async function handleImageCensorship(file, env) {
       };
     }
 
-    // Initialize Google GenAI client
-    const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+    const buf = await file.arrayBuffer();
+    const base64 = arrayBufferToBase64(buf);
     
-    // Create a temporary file blob
-    const fileBlob = new Blob([await file.arrayBuffer()], { type: file.type });
-    
-    // Upload the file to Google GenAI
-    const uploadedFile = await ai.files.upload({
-      file: fileBlob,
-      config: { mimeType: file.type }
-    });
-    
-    // Generate content analysis using the uploaded file
-    const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-lite",
-      contents: createUserContent([
-        createPartFromUri(uploadedFile.uri, uploadedFile.mimeType),
-        "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n각 항목에 대해 true/false만 응답하고, 발견된 유해 콘텐츠가 있다면 간략히 설명해주세요."
-      ]),
+    // 이미지 크기 처리 (3MB 초과시 리사이징)
+    let imageBase64 = base64;
+    try {
+      if (buf.byteLength > 3 * 1024 * 1024) {
+        const dataUrl = `data:${file.type};base64,${base64}`;
+        const resizedResp = await fetch(new Request(dataUrl, {
+          cf: { image: { width: 800, height: 800, fit: "inside" } }
+        }));
+        if (resizedResp.ok) {
+          const resizedBlob = await resizedResp.blob();
+          const resizedArrayBuffer = await resizedBlob.arrayBuffer();
+          imageBase64 = arrayBufferToBase64(resizedArrayBuffer);
+        }
+      }
+    } catch (e) {
+      console.log("이미지 리사이징 실패:", e);
+    }
+
+    // 향상된 API 요청 구조
+    const requestBody = {
+      contents: [
+        {
+          parts: [
+            {
+              text: "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n각 항목에 대해 true/false만 응답하고, 발견된 유해 콘텐츠가 있다면 간략히 설명해주세요."
+            },
+            {
+              inlineData: {
+                mimeType: file.type,
+                data: imageBase64
+              }
+            }
+          ]
+        }
+      ],
       generationConfig: {
         temperature: 0.1,
         topK: 40,
         topP: 0.95,
         maxOutputTokens: 256
       }
-    });
-    
-    // Get the analysis text
-    const analysisText = response.text;
-    
-    // Check if content is inappropriate
-    const inappropriate = isInappropriateContent(analysisText);
+    };
+
+    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
+    if (!analysis.success) {
+      return {
+        ok: false,
+        response: new Response(JSON.stringify({
+          success: false,
+          error: `Gemini API 호출 오류: ${analysis.error}`
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      };
+    }
+
+    const inappropriate = isInappropriateContent(analysis.text);
     if (inappropriate.isInappropriate) {
       return {
         ok: false,
@@ -293,7 +314,7 @@ async function handleImageCensorship(file, env) {
 }
 
 // =======================
-// 동영상 검열 - Gemini API 사용 (Google GenAI 방식)
+// 동영상 검열 - Gemini API 직접 호출
 // =======================
 async function handleVideoCensorship(file, env) {
   try {
@@ -314,146 +335,94 @@ async function handleVideoCensorship(file, env) {
       };
     }
 
-    // Initialize Google GenAI client
-    const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-    
-    // For videos, we may still need to analyze segments due to size constraints
-    // But we'll use the file upload method for each segment if possible
-    
-    // Create a temporary file blob from the full video
-    const fileBlob = new Blob([await file.arrayBuffer()], { type: file.type });
-    
-    // Upload the file to Google GenAI
-    try {
-      const uploadedFile = await ai.files.upload({
-        file: fileBlob,
-        config: { mimeType: file.type }
+    const videoBuffer = await file.arrayBuffer();
+    const base64 = arrayBufferToBase64(videoBuffer);
+
+    let segments = [];
+    const fileSizeMB = file.size / (1024 * 1024);
+    const numSamples = fileSizeMB <= 5 ? 2 : fileSizeMB <= 15 ? 3 : 4;
+    console.log(`샘플 수 결정: ${numSamples}개`);
+
+    const CHUNK_SIZE = 100000;
+
+    segments.push({
+      label: "시작 부분",
+      data: base64.substring(0, Math.min(CHUNK_SIZE, base64.length))
+    });
+
+    if (numSamples >= 3 && base64.length > CHUNK_SIZE * 2) {
+      const mid = Math.floor(base64.length / 2) - (CHUNK_SIZE / 2);
+      segments.push({
+        label: "중간 부분",
+        data: base64.substring(mid, Math.min(mid + CHUNK_SIZE, base64.length))
       });
-      
-      // Generate content analysis using the uploaded file
-      const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash-lite",
-        contents: createUserContent([
-          createPartFromUri(uploadedFile.uri, uploadedFile.mimeType),
-          "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n각 항목에 대해 true/false만 응답하고, 발견된 유해 콘텐츠가 있다면 간략히 설명해주세요."
-        ]),
+    }
+
+    if (numSamples >= 4 && base64.length > CHUNK_SIZE * 3) {
+      const q3 = Math.floor(base64.length * 0.75) - (CHUNK_SIZE / 2);
+      segments.push({
+        label: "75% 지점",
+        data: base64.substring(q3, Math.min(q3 + CHUNK_SIZE, base64.length))
+      });
+    }
+
+    segments.push({
+      label: "끝 부분",
+      data: base64.substring(Math.max(0, base64.length - CHUNK_SIZE))
+    });
+
+    console.log(`총 샘플 생성: ${segments.length}개`);
+
+    for (const segment of segments) {
+      console.log(`샘플 검열 중: ${segment.label}`);
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: `이 비디오의 ${segment.label}입니다. 부적절한 콘텐츠 여부를 true/false로 알려주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n발견 시 간략 설명.`
+              },
+              {
+                inlineData: {
+                  mimeType: file.type,
+                  data: segment.data
+                }
+              }
+            ]
+          }
+        ],
         generationConfig: {
           temperature: 0.1,
           topK: 40,
           topP: 0.95,
           maxOutputTokens: 256
         }
-      });
-      
-      // Get the analysis text
-      const analysisText = response.text;
-      
-      // Check if content is inappropriate
-      const inappropriate = isInappropriateContent(analysisText);
+      };
+
+      const analysis = await callGeminiAPI(geminiApiKey, requestBody);
+      if (!analysis.success) {
+        return {
+          ok: false,
+          response: new Response(JSON.stringify({
+            success: false,
+            error: `동영상 검열 오류 (${segment.label}): ${analysis.error}`
+          }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+        };
+      }
+
+      const inappropriate = isInappropriateContent(analysis.text);
       if (inappropriate.isInappropriate) {
         return {
           ok: false,
           response: new Response(JSON.stringify({
             success: false,
-            error: `검열됨: ${inappropriate.reasons.join(", ")}`
+            error: `검열됨 (${segment.label}): ${inappropriate.reasons.join(", ")}`
           }), { status: 400, headers: { 'Content-Type': 'application/json' } })
         };
       }
-      
-      return { ok: true };
-    } catch (fileUploadError) {
-      // If the full file upload fails (possibly due to size constraints),
-      // fall back to the segment method but use file upload for each segment
-      console.log("전체 파일 업로드 실패, 세그먼트 방식으로 전환:", fileUploadError);
-      
-      // Extract video segments (similar to the original code)
-      const videoBuffer = await file.arrayBuffer();
-      const fileSizeMB = file.size / (1024 * 1024);
-      const numSamples = fileSizeMB <= 5 ? 2 : fileSizeMB <= 15 ? 3 : 4;
-      console.log(`샘플 수 결정: ${numSamples}개`);
-      
-      const segments = [];
-      const CHUNK_SIZE = 500000; // 500KB chunks for better compatibility
-      
-      // Create segments from different parts of the video
-      let positions = [0]; // Start
-      
-      if (numSamples >= 3 && videoBuffer.byteLength > CHUNK_SIZE * 2) {
-        positions.push(Math.floor(videoBuffer.byteLength / 2) - (CHUNK_SIZE / 2)); // Middle
-      }
-      
-      if (numSamples >= 4 && videoBuffer.byteLength > CHUNK_SIZE * 3) {
-        positions.push(Math.floor(videoBuffer.byteLength * 0.75) - (CHUNK_SIZE / 2)); // 75% point
-      }
-      
-      positions.push(Math.max(0, videoBuffer.byteLength - CHUNK_SIZE)); // End
-      
-      // Create segment blobs and analyze each
-      for (let i = 0; i < positions.length; i++) {
-        const position = positions[i];
-        const segmentLabel = i === 0 ? "시작 부분" : 
-                             i === positions.length - 1 ? "끝 부분" : 
-                             i === 1 ? "중간 부분" : "75% 지점";
-        
-        console.log(`샘플 검열 중: ${segmentLabel}`);
-        
-        // Create a slice of the video buffer
-        const segmentBuffer = videoBuffer.slice(
-          position, 
-          Math.min(position + CHUNK_SIZE, videoBuffer.byteLength)
-        );
-        
-        // Create a blob for this segment
-        const segmentBlob = new Blob([segmentBuffer], { type: file.type });
-        
-        try {
-          // Upload the segment to Google GenAI
-          const uploadedSegment = await ai.files.upload({
-            file: segmentBlob,
-            config: { mimeType: file.type }
-          });
-          
-          // Generate content analysis for this segment
-          const segmentResponse = await ai.models.generateContent({
-            model: "gemini-2.0-flash-lite",
-            contents: createUserContent([
-              createPartFromUri(uploadedSegment.uri, uploadedSegment.mimeType),
-              `이 비디오의 ${segmentLabel}입니다. 부적절한 콘텐츠 여부를 true/false로 알려주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n발견 시 간략 설명.`
-            ]),
-            generationConfig: {
-              temperature: 0.1,
-              topK: 40,
-              topP: 0.95,
-              maxOutputTokens: 256
-            }
-          });
-          
-          // Check if this segment is inappropriate
-          const inappropriate = isInappropriateContent(segmentResponse.text);
-          if (inappropriate.isInappropriate) {
-            return {
-              ok: false,
-              response: new Response(JSON.stringify({
-                success: false,
-                error: `검열됨 (${segmentLabel}): ${inappropriate.reasons.join(", ")}`
-              }), { status: 400, headers: { 'Content-Type': 'application/json' } })
-            };
-          }
-        } catch (segmentError) {
-          console.log(`세그먼트 (${segmentLabel}) 검열 오류:`, segmentError);
-          return {
-            ok: false,
-            response: new Response(JSON.stringify({
-              success: false,
-              error: `동영상 세그먼트 (${segmentLabel}) 검열 중 오류 발생: ${segmentError.message}`
-            }), { status: 500, headers: { 'Content-Type': 'application/json' } })
-          };
-        }
-      }
-      
-      // If all segments pass, the video is considered appropriate
-      return { ok: true };
     }
+
+    return { ok: true };
   } catch (e) {
     console.log("handleVideoCensorship 오류:", e);
     return {
@@ -464,6 +433,49 @@ async function handleVideoCensorship(file, env) {
       }), { status: 500, headers: { 'Content-Type': 'application/json' } })
     };
   }
+}
+
+// Gemini API 호출 함수 (재시도 로직 포함)
+async function callGeminiAPI(apiKey, requestBody) {
+  let retryCount = 0;
+  const maxRetries = 3;
+  const retryDelay = 2000;
+
+  while (retryCount < maxRetries) {
+    try {
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+      if (!response.ok) {
+        if (response.status === 429 && retryCount < maxRetries - 1) {
+          retryCount++;
+          console.log(`할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
+          await new Promise(r => setTimeout(r, retryDelay));
+          continue;
+        }
+        const errText = await response.text();
+        return { success: false, error: `API 오류 (${response.status}): ${errText}` };
+      }
+      const data = await response.json();
+      const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!content) {
+        return { success: false, error: '유효하지 않은 Gemini API 응답' };
+      }
+      return { success: true, text: content };
+    } catch (e) {
+      retryCount++;
+      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
+      if (retryCount < maxRetries) {
+        await new Promise(r => setTimeout(r, retryDelay));
+        continue;
+      }
+      return { success: false, error: `API 호출 오류: ${e.message}` };
+    }
+  }
+  return { success: false, error: '최대 재시도 횟수 초과' };
 }
 
 // =======================
@@ -528,7 +540,7 @@ async function generateUniqueCode(env, length = 8) {
 }
 
 // =======================
-// ArrayBuffer -> base64 (이전 방식용 유지)
+// ArrayBuffer -> base64
 // =======================
 function arrayBufferToBase64(buffer) {
   let binary = '';
