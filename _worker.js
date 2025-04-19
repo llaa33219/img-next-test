@@ -1,5 +1,3 @@
-import { GoogleGenAI, createUserContent, createPartFromUri } from "@google/genai";
-
 // ==============================
 // 전역: 중복 요청 관리 Map
 // ==============================
@@ -8,74 +6,71 @@ const requestsInProgress = {};
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const path = url.pathname.replace(/\/$/, "");
+    // 경로 끝의 슬래시 제거
+    const path = url.pathname.replace(/\/$/, '');
 
-    // ------------------------------
-    // A) POST /ai — 오디오 업로드 → AI 처리
-    // ------------------------------
-    if (request.method === "POST" && path === "/ai") {
-      const res = await handleAudioAI(request, env);
-      // CORS 허용 (필요시)
-      if (request.headers.get("Origin")) {
-        res.headers.set("Access-Control-Allow-Origin", "*");
-      }
-      return res;
-    }
+    // =======================================
+    // 1) [POST] /upload 또는 /upload/ => 업로드 처리
+    // =======================================
+    if (request.method === 'POST' && path === '/upload') {
+      const cfReqId = request.headers.get('Cf-Request-Id') || '';
 
-    // ------------------------------
-    // 1) POST /upload — 기존 파일 업로드 처리
-    // ------------------------------
-    if (request.method === "POST" && path === "/upload") {
-      const cfReqId = request.headers.get("Cf-Request-Id") || "";
+      // ----- 중복 요청 체크 -----
       if (cfReqId) {
-        // 중복 요청 체크
         if (requestsInProgress[cfReqId]) {
+          console.log(`[Dedup] 중복 요청 감지 => Cf-Request-Id=${cfReqId}. 기존 Promise 공유.`);
           return requestsInProgress[cfReqId].promise;
         } else {
           let resolveFn, rejectFn;
-          const promise = new Promise((res, rej) => {
-            resolveFn = res;
-            rejectFn = rej;
+          const promise = new Promise((resolve, reject) => {
+            resolveFn = resolve;
+            rejectFn = reject;
           });
           requestsInProgress[cfReqId] = { promise, resolve: resolveFn, reject: rejectFn };
-          // 1분 후 캐시 해제
+
+          // 일정 시간(1분) 후 메모리 해제
           ctx.waitUntil((async () => {
             await new Promise(r => setTimeout(r, 60000));
             delete requestsInProgress[cfReqId];
           })());
+
+          let finalResp;
           try {
-            const resp = await handleUpload(request, env);
-            requestsInProgress[cfReqId].resolve(resp);
-            return resp;
+            finalResp = await handleUpload(request, env);
+            requestsInProgress[cfReqId].resolve(finalResp);
           } catch (err) {
-            const fail = new Response(JSON.stringify({ success: false, error: err.message }), {
-              status: 500,
-              headers: { "Content-Type": "application/json" }
-            });
-            requestsInProgress[cfReqId].reject(fail);
-            return fail;
+            console.log("handleUpload error:", err);
+            const failResp = new Response(
+              JSON.stringify({ success: false, error: err.message }),
+              { status: 500, headers: { 'Content-Type': 'application/json' } }
+            );
+            requestsInProgress[cfReqId].reject(failResp);
+            finalResp = failResp;
           }
+          return finalResp;
         }
+      } else {
+        return handleUpload(request, env);
       }
-      return handleUpload(request, env);
     }
 
-    // ------------------------------
-    // 2) GET /{code or customName} — 이미지/영상 서빙
-    // ------------------------------
-    if (request.method === "GET" && url.pathname.length > 1) {
-      // 정적 에셋 (.js, .css 등)
-      if (url.pathname.includes(".")) {
+    // =======================================
+    // 2) [GET] /{코드 또는 커스텀 이름} => R2 파일 or HTML
+    // =======================================
+    else if (request.method === 'GET' && url.pathname.length > 1) {
+      // 정적 에셋(파일명에 . 포함) 제공
+      if (url.pathname.includes('.')) {
         return env.ASSETS.fetch(request);
       }
-      // 다중 파일
-      if (url.pathname.includes(",")) {
-        const codes = url.pathname.slice(1).split(",").map(decodeURIComponent);
-        if (url.searchParams.get("raw") === "1") {
-          const object = await env.IMAGES.get(codes[0]);
-          if (!object) return new Response("Not Found", { status: 404 });
+      // 다중 파일 요청
+      if (url.pathname.indexOf(',') !== -1) {
+        const codes = url.pathname.slice(1).split(',').map(code => decodeURIComponent(code));
+        if (url.searchParams.get('raw') === '1') {
+          const code = codes[0];
+          const object = await env.IMAGES.get(code);
+          if (!object) return new Response('Not Found', { status: 404 });
           const headers = new Headers();
-          headers.set("Content-Type", object.httpMetadata?.contentType || "application/octet-stream");
+          headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
           return new Response(object.body, { headers });
         }
         const objects = await Promise.all(
@@ -83,133 +78,89 @@ export default {
         );
         let mediaTags = "";
         for (const { code, object } of objects) {
-          if (object && object.httpMetadata?.contentType?.startsWith("video/")) {
-            mediaTags += `<video controls src="https://${url.host}/${code}?raw=1"></video>\n`;
+          if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
+            mediaTags += `<video src="https://${url.host}/${code}?raw=1"></video>\n`;
           } else {
-            mediaTags += `<img onclick="toggleZoom(this)" src="https://${url.host}/${code}?raw=1" />\n`;
+            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
           }
         }
         return new Response(renderHTML(mediaTags, url.host), {
           headers: { "Content-Type": "text/html; charset=UTF-8" }
         });
       }
-      // 단일 파일
-      const key = decodeURIComponent(url.pathname.slice(1));
-      const object = await env.IMAGES.get(key);
-      if (!object) return new Response("Not Found", { status: 404 });
-      if (url.searchParams.get("raw") === "1") {
-        const headers = new Headers();
-        headers.set("Content-Type", object.httpMetadata?.contentType || "application/octet-stream");
-        return new Response(object.body, { headers });
+      // 단일 파일 요청
+      else {
+        const key = decodeURIComponent(url.pathname.slice(1));
+        const object = await env.IMAGES.get(key);
+        if (!object) return new Response('Not Found', { status: 404 });
+        if (url.searchParams.get('raw') === '1') {
+          const headers = new Headers();
+          headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
+          return new Response(object.body, { headers });
+        } else {
+          let mediaTag = "";
+          if (object.httpMetadata?.contentType?.startsWith('video/')) {
+            mediaTag = `<video src="https://${url.host}/${key}?raw=1"></video>\n`;
+          } else {
+            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
+          }
+          return new Response(renderHTML(mediaTag, url.host), {
+            headers: { "Content-Type": "text/html; charset=UTF-8" }
+          });
+        }
       }
-      let tag = "";
-      if (object.httpMetadata?.contentType?.startsWith("video/")) {
-        tag = `<video controls src="https://${url.host}/${key}?raw=1"></video>\n`;
-      } else {
-        tag = `<img onclick="toggleZoom(this)" src="https://${url.host}/${key}?raw=1" />\n`;
-      }
-      return new Response(renderHTML(tag, url.host), {
-        headers: { "Content-Type": "text/html; charset=UTF-8" }
-      });
     }
 
-    // ------------------------------
-    // 3) 기타 — 기본 정적 에셋 제공
-    // ------------------------------
+    // =======================================
+    // 3) 그 외 => 기본 정적 에셋(ASSETS)
+    // =======================================
     return env.ASSETS.fetch(request);
   }
 };
 
 // =======================
-// A) /ai 핸들러: 오디오 업로드 → AI 처리
-// =======================
-async function handleAudioAI(request, env) {
-  try {
-    const formData = await request.formData();
-    const file = formData.get("file");
-    if (!file || !(file instanceof Blob)) {
-      return new Response(JSON.stringify({ success: false, error: "file 파라미터가 없습니다." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-
-    const ai = new GoogleGenAI({ apiKey: env.GOOGLE_API_KEY });
-    const arrayBuffer = await file.arrayBuffer();
-
-    // 1) 업로드
-    const uploadResp = await ai.files.upload({
-      file: arrayBuffer,
-      config: { mimeType: file.type, filename: file.name || "audio" }
-    });
-
-    // 2) AI 설명 생성
-    const genResp = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: createUserContent([
-        createPartFromUri(uploadResp.uri, uploadResp.mimeType),
-        "Describe this audio clip in detail."
-      ])
-    });
-
-    const text = genResp.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-    return new Response(JSON.stringify({ success: true, text }), {
-      headers: { "Content-Type": "application/json" }
-    });
-  } catch (e) {
-    return new Response(JSON.stringify({ success: false, error: e.message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" }
-    });
-  }
-}
-
-// =======================
-// B) /upload 핸들러: 검열 + R2 업로드
+// 메인 업로드 처리 함수
 // =======================
 async function handleUpload(request, env) {
   const formData = await request.formData();
-  const files = formData.getAll("file");
-  let customName = formData.get("customName");
+  const files = formData.getAll('file');
+  let customName = formData.get('customName');
 
   if (!files || files.length === 0) {
-    return new Response(JSON.stringify({ success: false, error: "파일이 제공되지 않았습니다." }), {
+    return new Response(JSON.stringify({ success: false, error: '파일이 제공되지 않았습니다.' }), {
       status: 400,
-      headers: { "Content-Type": "application/json" }
+      headers: { 'Content-Type': 'application/json' }
     });
   }
 
   const allowedImageTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
   const allowedVideoTypes = ["video/mp4", "video/webm", "video/ogg", "video/x-msvideo", "video/avi", "video/msvideo"];
-
   for (const file of files) {
-    if (file.type.startsWith("image/")) {
+    if (file.type.startsWith('image/')) {
       if (!allowedImageTypes.includes(file.type)) {
-        return new Response(JSON.stringify({ success: false, error: "지원하지 않는 이미지 형식입니다." }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" }
+        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 이미지 형식입니다.' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' }
         });
       }
-    } else if (file.type.startsWith("video/")) {
+    } else if (file.type.startsWith('video/')) {
       if (!allowedVideoTypes.includes(file.type)) {
-        return new Response(JSON.stringify({ success: false, error: "지원하지 않는 동영상 형식입니다." }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" }
+        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 동영상 형식입니다.' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' }
         });
       }
     } else {
-      return new Response(JSON.stringify({ success: false, error: "지원하지 않는 파일 형식입니다." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" }
+      return new Response(JSON.stringify({ success: false, error: '지원하지 않는 파일 형식입니다.' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' }
       });
     }
   }
 
-  // 검열 처리
+  // =========================
+  // 1) 검열: 불량이면 저장 안 하고 에러 반환
+  // =========================
   try {
     for (const file of files) {
-      if (file.type.startsWith("image/")) {
+      if (file.type.startsWith('image/')) {
         const r = await handleImageCensorship(file, env);
         if (!r.ok) return r.response;
       } else {
@@ -218,178 +169,314 @@ async function handleUpload(request, env) {
       }
     }
   } catch (e) {
-    console.log("검열 과정 오류:", e);
-    return new Response(JSON.stringify({ success: false, error: `검열 처리 중 오류: ${e.message}` }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" }
-    });
+    console.log("검열 과정에서 예상치 못한 오류 발생:", e);
+    return new Response(JSON.stringify({
+      success: false,
+      error: `검열 처리 중 오류: ${e.message}`
+    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
 
-  // R2 업로드
+  // =========================
+  // 2) R2 업로드 (검열 통과만 저장)
+  // =========================
   let codes = [];
   if (customName && files.length === 1) {
     customName = customName.replace(/ /g, "_");
-    const exists = await env.IMAGES.get(customName);
-    if (exists) {
-      return new Response(JSON.stringify({ success: false, error: "이미 사용 중인 이름입니다. 다른 이름을 선택해주세요." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" }
-      });
+    const existingObject = await env.IMAGES.get(customName);
+    if (existingObject) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: '이미 사용 중인 이름입니다. 다른 이름을 선택해주세요.'
+      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
-    const buf = await files[0].arrayBuffer();
-    await env.IMAGES.put(customName, buf, { httpMetadata: { contentType: files[0].type } });
+    const file = files[0];
+    const fileBuffer = await file.arrayBuffer();
+    await env.IMAGES.put(customName, fileBuffer, {
+      httpMetadata: { contentType: file.type }
+    });
     codes.push(customName);
   } else {
     for (const file of files) {
       const code = await generateUniqueCode(env);
-      const buf = await file.arrayBuffer();
-      await env.IMAGES.put(code, buf, { httpMetadata: { contentType: file.type } });
+      const fileBuffer = await file.arrayBuffer();
+      await env.IMAGES.put(code, fileBuffer, {
+        httpMetadata: { contentType: file.type }
+      });
       codes.push(code);
     }
   }
 
-  const host = request.headers.get("host") || "example.com";
-  const url = `https://${host}/${codes.join(",")}`;
-  console.log("업로드 완료:", url);
+  const host = request.headers.get('host') || 'example.com';
+  const finalUrl = `https://${host}/${codes.join(",")}`;
 
-  return new Response(JSON.stringify({ success: true, url }), {
-    headers: { "Content-Type": "application/json" }
+  console.log(">>> 업로드 완료 =>", finalUrl);
+
+  return new Response(JSON.stringify({ success: true, url: finalUrl }), {
+    headers: { 'Content-Type': 'application/json' }
   });
 }
 
 // =======================
-// 이미지 검열
+// 이미지 검열 - Gemini API 사용
 // =======================
 async function handleImageCensorship(file, env) {
   try {
     const buf = await file.arrayBuffer();
-    let base64 = arrayBufferToBase64(buf);
-    const apiKey = env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return { ok: false, response: new Response(JSON.stringify({ success: false, error: "Gemini API 키 없음" }), { status: 500, headers: { "Content-Type": "application/json" } }) };
+    const base64 = arrayBufferToBase64(buf);
+    const geminiApiKey = env.GEMINI_API_KEY;
+    if (!geminiApiKey) {
+      return {
+        ok: false,
+        response: new Response(JSON.stringify({
+          success: false,
+          error: 'Gemini API 키가 설정되지 않았습니다.'
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      };
     }
-    // 리사이징
+
+    let imageBase64 = base64;
     try {
       if (buf.byteLength > 3 * 1024 * 1024) {
         const dataUrl = `data:${file.type};base64,${base64}`;
-        const resp = await fetch(new Request(dataUrl, { cf: { image: { width: 800, height: 800, fit: "inside" } } }));
-        if (resp.ok) {
-          const blob = await resp.blob();
-          const arr = await blob.arrayBuffer();
-          base64 = arrayBufferToBase64(arr);
+        const resizedResp = await fetch(new Request(dataUrl, {
+          cf: { image: { width: 800, height: 800, fit: "inside" } }
+        }));
+        if (resizedResp.ok) {
+          const resizedBlob = await resizedResp.blob();
+          const resizedArrayBuffer = await resizedBlob.arrayBuffer();
+          imageBase64 = arrayBufferToBase64(resizedArrayBuffer);
         }
       }
-    } catch (e) { console.log("리사이즈 실패:", e); }
+    } catch (e) {
+      console.log("이미지 리사이징 실패:", e);
+    }
+
     const requestBody = {
-      contents: [{ parts: [{ text: "부적절 콘텐츠 여부 확인", inlineData: { mimeType: file.type, data: base64 } }] }],
-      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
+      contents: [
+        {
+          parts: [
+            {
+              text: "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n각 항목에 대해 true/false만 응답하고, 발견된 유해 콘텐츠가 있다면 간략히 설명해주세요."
+            },
+            {
+              inlineData: {
+                mimeType: file.type,
+                data: imageBase64
+              }
+            }
+          ]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.1,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 256
+      }
     };
-    const analysis = await callGeminiAPI(apiKey, requestBody);
+
+    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
     if (!analysis.success) {
-      return { ok: false, response: new Response(JSON.stringify({ success: false, error: `API 오류: ${analysis.error}` }), { status: 500, headers: { "Content-Type": "application/json" } }) };
+      return {
+        ok: false,
+        response: new Response(JSON.stringify({
+          success: false,
+          error: `Gemini API 호출 오류: ${analysis.error}`
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      };
     }
-    const bad = isInappropriateContent(analysis.text);
-    if (bad.isInappropriate) {
-      return { ok: false, response: new Response(JSON.stringify({ success: false, error: `검열됨: ${bad.reasons.join(", ")}` }), { status: 400, headers: { "Content-Type": "application/json" } }) };
+
+    const inappropriate = isInappropriateContent(analysis.text);
+    if (inappropriate.isInappropriate) {
+      return {
+        ok: false,
+        response: new Response(JSON.stringify({
+          success: false,
+          error: `검열됨: ${inappropriate.reasons.join(", ")}`
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+      };
     }
+
     return { ok: true };
   } catch (e) {
-    console.log("이미지 검열 오류:", e);
-    return { ok: false, response: new Response(JSON.stringify({ success: false, error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } }) };
+    console.log("handleImageCensorship error:", e);
+    return {
+      ok: false,
+      response: new Response(JSON.stringify({
+        success: false,
+        error: `이미지 검열 중 오류 발생: ${e.message}`
+      }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+    };
   }
 }
 
 // =======================
-// 동영상 검열
+// 동영상 검열 - Gemini API 사용
 // =======================
 async function handleVideoCensorship(file, env) {
   try {
-    const apiKey = env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return { ok: false, response: new Response(JSON.stringify({ success: false, error: "Gemini API 키 없음" }), { status: 500, headers: { "Content-Type": "application/json" } }) };
+    console.log(`비디오 크기: ${(file.size / (1024*1024)).toFixed(2)}MB`);
+    const videoDuration = await getMP4Duration(file);
+    if (videoDuration !== null) {
+      console.log(`비디오 길이: ${videoDuration.toFixed(2)}초`);
     }
-    const buf = await file.arrayBuffer();
-    const base64 = arrayBufferToBase64(buf);
+
+    const geminiApiKey = env.GEMINI_API_KEY;
+    if (!geminiApiKey) {
+      return {
+        ok: false,
+        response: new Response(JSON.stringify({
+          success: false,
+          error: 'Gemini API 키가 설정되지 않았습니다.'
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      };
+    }
+
+    const videoBuffer = await file.arrayBuffer();
+    const base64 = arrayBufferToBase64(videoBuffer);
+
+    let segments = [];
     const fileSizeMB = file.size / (1024 * 1024);
     const numSamples = fileSizeMB <= 5 ? 2 : fileSizeMB <= 15 ? 3 : 4;
-    const CHUNK_SIZE = 100000;
-    const segments = [];
-    // 시작
-    segments.push({ label: "시작 부분", data: base64.substring(0, Math.min(CHUNK_SIZE, base64.length)) });
-    // 중간
-    if (numSamples >= 3 && base64.length > CHUNK_SIZE * 2) {
-      const mid = Math.floor(base64.length / 2) - CHUNK_SIZE / 2;
-      segments.push({ label: "중간 부분", data: base64.substring(mid, Math.min(mid + CHUNK_SIZE, base64.length)) });
-    }
-    // 75%
-    if (numSamples >= 4 && base64.length > CHUNK_SIZE * 3) {
-      const q3 = Math.floor(base64.length * 0.75) - CHUNK_SIZE / 2;
-      segments.push({ label: "75% 지점", data: base64.substring(q3, Math.min(q3 + CHUNK_SIZE, base64.length)) });
-    }
-    // 끝
-    segments.push({ label: "끝 부분", data: base64.substring(Math.max(0, base64.length - CHUNK_SIZE)) });
+    console.log(`샘플 수 결정: ${numSamples}개`);
 
-    for (const seg of segments) {
+    const CHUNK_SIZE = 100000;
+
+    segments.push({
+      label: "시작 부분",
+      data: base64.substring(0, Math.min(CHUNK_SIZE, base64.length))
+    });
+
+    if (numSamples >= 3 && base64.length > CHUNK_SIZE * 2) {
+      const mid = Math.floor(base64.length / 2) - (CHUNK_SIZE / 2);
+      segments.push({
+        label: "중간 부분",
+        data: base64.substring(mid, Math.min(mid + CHUNK_SIZE, base64.length))
+      });
+    }
+
+    if (numSamples >= 4 && base64.length > CHUNK_SIZE * 3) {
+      const q3 = Math.floor(base64.length * 0.75) - (CHUNK_SIZE / 2);
+      segments.push({
+        label: "75% 지점",
+        data: base64.substring(q3, Math.min(q3 + CHUNK_SIZE, base64.length))
+      });
+    }
+
+    segments.push({
+      label: "끝 부분",
+      data: base64.substring(Math.max(0, base64.length - CHUNK_SIZE))
+    });
+
+    console.log(`총 샘플 생성: ${segments.length}개`);
+
+    for (const segment of segments) {
+      console.log(`샘플 검열 중: ${segment.label}`);
       const requestBody = {
-        contents: [{ parts: [{ text: `이 비디오의 ${seg.label}`, inlineData: { mimeType: file.type, data: seg.data } }] }],
-        generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
+        contents: [
+          {
+            parts: [
+              {
+                text: `이 비디오의 ${segment.label}입니다. 부적절한 콘텐츠 여부를 true/false로 알려주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n발견 시 간략 설명.`
+              },
+              {
+                inlineData: {
+                  mimeType: file.type,
+                  data: segment.data
+                }
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 256
+        }
       };
-      const analysis = await callGeminiAPI(apiKey, requestBody);
+
+      const analysis = await callGeminiAPI(geminiApiKey, requestBody);
       if (!analysis.success) {
-        return { ok: false, response: new Response(JSON.stringify({ success: false, error: `동영상 검열 오류 (${seg.label}): ${analysis.error}` }), { status: 500, headers: { "Content-Type": "application/json" } }) };
+        return {
+          ok: false,
+          response: new Response(JSON.stringify({
+            success: false,
+            error: `동영상 검열 오류 (${segment.label}): ${analysis.error}`
+          }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+        };
       }
-      const bad = isInappropriateContent(analysis.text);
-      if (bad.isInappropriate) {
-        return { ok: false, response: new Response(JSON.stringify({ success: false, error: `검열됨 (${seg.label}): ${bad.reasons.join(", ")}` }), { status: 400, headers: { "Content-Type": "application/json" } }) };
+
+      const inappropriate = isInappropriateContent(analysis.text);
+      if (inappropriate.isInappropriate) {
+        return {
+          ok: false,
+          response: new Response(JSON.stringify({
+            success: false,
+            error: `검열됨 (${segment.label}): ${inappropriate.reasons.join(", ")}`
+          }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+        };
       }
     }
+
     return { ok: true };
   } catch (e) {
-    console.log("동영상 검열 오류:", e);
-    return { ok: false, response: new Response(JSON.stringify({ success: false, error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } }) };
+    console.log("handleVideoCensorship 오류:", e);
+    return {
+      ok: false,
+      response: new Response(JSON.stringify({
+        success: false,
+        error: `동영상 검열 중 오류 발생: ${e.message}`
+      }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+    };
   }
 }
 
-// =======================
-// Gemini API 호출
-// =======================
+// Gemini API 호출 함수 (재시도 로직 포함)
 async function callGeminiAPI(apiKey, requestBody) {
-  let retryCount = 0, maxRetries = 3, retryDelay = 2000;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+  let retryCount = 0;
+  const maxRetries = 3;
+  const retryDelay = 2000;
+
   while (retryCount < maxRetries) {
     try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
       });
-      if (!res.ok) {
-        if (res.status === 429 && retryCount < maxRetries - 1) {
+      if (!response.ok) {
+        if (response.status === 429 && retryCount < maxRetries - 1) {
           retryCount++;
+          console.log(`할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
           await new Promise(r => setTimeout(r, retryDelay));
           continue;
         }
-        const txt = await res.text();
-        return { success: false, error: `API 오류 (${res.status}): ${txt}` };
+        const errText = await response.text();
+        return { success: false, error: `API 오류 (${response.status}): ${errText}` };
       }
-      const data = await res.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) return { success: false, error: "유효하지 않은 응답" };
-      return { success: true, text };
+      const data = await response.json();
+      const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!content) {
+        return { success: false, error: '유효하지 않은 Gemini API 응답' };
+      }
+      return { success: true, text: content };
     } catch (e) {
       retryCount++;
+      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
       if (retryCount < maxRetries) {
         await new Promise(r => setTimeout(r, retryDelay));
         continue;
       }
-      return { success: false, error: e.message };
+      return { success: false, error: `API 호출 오류: ${e.message}` };
     }
   }
-  return { success: false, error: "최대 재시도 횟수 초과" };
+  return { success: false, error: '최대 재시도 횟수 초과' };
 }
 
 // =======================
-// 부적절 콘텐츠 판정
+// 부적절한 내용 분석 함수
 // =======================
 function isInappropriateContent(responseText) {
   const txt = responseText.toLowerCase();
@@ -403,25 +490,25 @@ function isInappropriateContent(responseText) {
 }
 
 // =======================
-// MP4 길이 추출
+// MP4 재생길이 간단 추출 함수
 // =======================
 async function getMP4Duration(file) {
   try {
-    const buf = await file.arrayBuffer();
-    const dv = new DataView(buf);
-    const u8 = new Uint8Array(buf);
-    for (let i = 0; i < u8.length - 4; i++) {
-      if (u8[i] === 109 && u8[i+1] === 118 && u8[i+2] === 104 && u8[i+3] === 100) {
-        const start = i - 4;
-        const version = dv.getUint8(start + 8);
+    const buffer = await file.arrayBuffer();
+    const dv = new DataView(buffer);
+    const uint8 = new Uint8Array(buffer);
+    for (let i = 0; i < uint8.length - 4; i++) {
+      if (uint8[i] === 109 && uint8[i+1] === 118 && uint8[i+2] === 104 && uint8[i+3] === 100) {
+        const boxStart = i - 4;
+        const version = dv.getUint8(boxStart + 8);
         if (version === 0) {
-          const timescale = dv.getUint32(start + 20);
-          const duration = dv.getUint32(start + 24);
+          const timescale = dv.getUint32(boxStart + 20);
+          const duration = dv.getUint32(boxStart + 24);
           return duration / timescale;
-        } else {
-          const timescale = dv.getUint32(start + 28);
-          const high = dv.getUint32(start + 32);
-          const low = dv.getUint32(start + 36);
+        } else if (version === 1) {
+          const timescale = dv.getUint32(boxStart + 28);
+          const high = dv.getUint32(boxStart + 32);
+          const low  = dv.getUint32(boxStart + 36);
           return (high * 2**32 + low) / timescale;
         }
       }
@@ -434,26 +521,26 @@ async function getMP4Duration(file) {
 }
 
 // =======================
-// 유니크 코드 생성
+// 고유 8자 코드 생성
 // =======================
 async function generateUniqueCode(env, length = 8) {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 10; i++) {
-    let code = "";
-    for (let j = 0; j < length; j++) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  for (let attempt = 0; attempt < 10; attempt++) {
+    let code = '';
+    for (let i = 0; i < length; i++) {
       code += chars.charAt(Math.floor(Math.random() * chars.length));
     }
-    const exists = await env.IMAGES.get(code);
-    if (!exists) return code;
+    const existing = await env.IMAGES.get(code);
+    if (!existing) return code;
   }
-  throw new Error("코드 생성 실패");
+  throw new Error("코드 생성 실패(10회 시도 모두 중복)");
 }
 
 // =======================
-// ArrayBuffer → Base64
+// ArrayBuffer -> base64
 // =======================
 function arrayBufferToBase64(buffer) {
-  let binary = "";
+  let binary = '';
   const bytes = new Uint8Array(buffer);
   for (let i = 0; i < bytes.byteLength; i++) {
     binary += String.fromCharCode(bytes[i]);
@@ -462,7 +549,7 @@ function arrayBufferToBase64(buffer) {
 }
 
 // =======================
-// HTML 렌더링
+// 최종 HTML 렌더
 // =======================
 function renderHTML(mediaTags, host) {
   return `<!DOCTYPE html>
