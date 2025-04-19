@@ -1,4 +1,10 @@
 // ==============================
+// Cloudflare Worker with 기존 Upload/Get 기능 + Google GenAI 오디오 처리 통합
+// ==============================
+
+import { GoogleGenAI, createUserContent, createPartFromUri } from "@google/genai";
+
+// ==============================
 // 전역: 중복 요청 관리 Map
 // ==============================
 const requestsInProgress = {};
@@ -6,117 +12,161 @@ const requestsInProgress = {};
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    // 경로 끝의 슬래시 제거
-    const path = url.pathname.replace(/\/$/, '');
+    const path = url.pathname.replace(/\/$/, "");  // 경로 끝 슬래시 제거
 
-    // =======================================
-    // 1) [POST] /upload 또는 /upload/ => 업로드 처리
-    // =======================================
-    if (request.method === 'POST' && path === '/upload') {
-      const cfReqId = request.headers.get('Cf-Request-Id') || '';
+    // ------------------------------
+    // 0) /ai — 오디오 업로드 → AI 처리
+    // ------------------------------
+    if (request.method === "POST" && path === "/ai") {
+      // CORS 처리 (필요시)
+      if (request.headers.get("Origin")) {
+        const res = await handleAudioAI(request, env);
+        res.headers.set("Access-Control-Allow-Origin", "*");
+        return res;
+      }
+      return handleAudioAI(request, env);
+    }
 
-      // ----- 중복 요청 체크 -----
+    // ------------------------------
+    // 1) /upload — 기존 파일 업로드 처리
+    // ------------------------------
+    if (request.method === "POST" && path === "/upload") {
+      const cfReqId = request.headers.get("Cf-Request-Id") || "";
       if (cfReqId) {
         if (requestsInProgress[cfReqId]) {
-          console.log(`[Dedup] 중복 요청 감지 => Cf-Request-Id=${cfReqId}. 기존 Promise 공유.`);
           return requestsInProgress[cfReqId].promise;
         } else {
           let resolveFn, rejectFn;
-          const promise = new Promise((resolve, reject) => {
-            resolveFn = resolve;
-            rejectFn = reject;
+          const promise = new Promise((res, rej) => {
+            resolveFn = res; rejectFn = rej;
           });
           requestsInProgress[cfReqId] = { promise, resolve: resolveFn, reject: rejectFn };
-
-          // 일정 시간(1분) 후 메모리 해제
           ctx.waitUntil((async () => {
             await new Promise(r => setTimeout(r, 60000));
             delete requestsInProgress[cfReqId];
           })());
-
-          let finalResp;
           try {
-            finalResp = await handleUpload(request, env);
-            requestsInProgress[cfReqId].resolve(finalResp);
-          } catch (err) {
-            console.log("handleUpload error:", err);
-            const failResp = new Response(
-              JSON.stringify({ success: false, error: err.message }),
-              { status: 500, headers: { 'Content-Type': 'application/json' } }
-            );
-            requestsInProgress[cfReqId].reject(failResp);
-            finalResp = failResp;
+            const resp = await handleUpload(request, env);
+            requestsInProgress[cfReqId].resolve(resp);
+            return resp;
+          } catch (e) {
+            const fail = new Response(JSON.stringify({ success:false, error:e.message }), {
+              status:500, headers:{"Content-Type":"application/json"}
+            });
+            requestsInProgress[cfReqId].reject(fail);
+            return fail;
           }
-          return finalResp;
         }
-      } else {
-        return handleUpload(request, env);
       }
+      return handleUpload(request, env);
     }
 
-    // =======================================
-    // 2) [GET] /{코드 또는 커스텀 이름} => R2 파일 or HTML
-    // =======================================
-    else if (request.method === 'GET' && url.pathname.length > 1) {
-      // 정적 에셋(파일명에 . 포함) 제공
-      if (url.pathname.includes('.')) {
+    // ------------------------------
+    // 2) GET /<code or customName> — 이미지/영상 서빙
+    // ------------------------------
+    if (request.method === "GET" && url.pathname.length > 1) {
+      // 정적 에셋
+      if (url.pathname.includes(".")) {
         return env.ASSETS.fetch(request);
       }
-      // 다중 파일 요청
-      if (url.pathname.indexOf(',') !== -1) {
-        const codes = url.pathname.slice(1).split(',').map(code => decodeURIComponent(code));
-        if (url.searchParams.get('raw') === '1') {
-          const code = codes[0];
-          const object = await env.IMAGES.get(code);
-          if (!object) return new Response('Not Found', { status: 404 });
-          const headers = new Headers();
-          headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
-          return new Response(object.body, { headers });
+      // 다중 파일
+      if (url.pathname.includes(",")) {
+        const codes = url.pathname.slice(1).split(",").map(decodeURIComponent);
+        if (url.searchParams.get("raw") === "1") {
+          const obj = await env.IMAGES.get(codes[0]);
+          if (!obj) return new Response("Not Found", { status:404 });
+          const h = new Headers();
+          h.set("Content-Type", obj.httpMetadata?.contentType||"application/octet-stream");
+          return new Response(obj.body, { headers: h });
         }
-        const objects = await Promise.all(
-          codes.map(async code => ({ code, object: await env.IMAGES.get(code) }))
-        );
+        const objs = await Promise.all(codes.map(async code=>({code,object:await env.IMAGES.get(code)})));
         let mediaTags = "";
-        for (const { code, object } of objects) {
-          if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTags += `<video src="https://${url.host}/${code}?raw=1"></video>\n`;
+        for (const { code, object } of objs) {
+          if (object && object.httpMetadata?.contentType.startsWith("video/")) {
+            mediaTags += `<video controls src="https://${url.host}/${code}?raw=1"></video>\n`;
           } else {
-            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
+            mediaTags += `<img onclick="toggleZoom(this)" src="https://${url.host}/${code}?raw=1"/>\n`;
           }
         }
         return new Response(renderHTML(mediaTags, url.host), {
-          headers: { "Content-Type": "text/html; charset=UTF-8" }
+          headers:{"Content-Type":"text/html; charset=UTF-8"}
         });
       }
-      // 단일 파일 요청
-      else {
-        const key = decodeURIComponent(url.pathname.slice(1));
-        const object = await env.IMAGES.get(key);
-        if (!object) return new Response('Not Found', { status: 404 });
-        if (url.searchParams.get('raw') === '1') {
-          const headers = new Headers();
-          headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
-          return new Response(object.body, { headers });
-        } else {
-          let mediaTag = "";
-          if (object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTag = `<video src="https://${url.host}/${key}?raw=1"></video>\n`;
-          } else {
-            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
-          }
-          return new Response(renderHTML(mediaTag, url.host), {
-            headers: { "Content-Type": "text/html; charset=UTF-8" }
-          });
-        }
+      // 단일 파일
+      const key = decodeURIComponent(url.pathname.slice(1));
+      const object = await env.IMAGES.get(key);
+      if (!object) return new Response("Not Found", { status:404 });
+      if (url.searchParams.get("raw")==="1") {
+        const h=new Headers();
+        h.set("Content-Type", object.httpMetadata?.contentType||"application/octet-stream");
+        return new Response(object.body,{headers:h});
       }
+      let tag="";
+      if (object.httpMetadata?.contentType.startsWith("video/")) {
+        tag=`<video controls src="https://${url.host}/${key}?raw=1"></video>\n`;
+      } else {
+        tag=`<img onclick="toggleZoom(this)" src="https://${url.host}/${key}?raw=1"/>\n`;
+      }
+      return new Response(renderHTML(tag, url.host), {
+        headers:{"Content-Type":"text/html; charset=UTF-8"}
+      });
     }
 
-    // =======================================
-    // 3) 그 외 => 기본 정적 에셋(ASSETS)
-    // =======================================
+    // ------------------------------
+    // 3) 그 외 정적 에셋
+    // ------------------------------
     return env.ASSETS.fetch(request);
   }
 };
+
+// =======================
+// A) /ai 핸들러: 오디오 업로드 → AI 처리
+// =======================
+async function handleAudioAI(request, env) {
+  try {
+    // form-data에서 file 추출
+    const formData = await request.formData();
+    const file = formData.get("file");
+    if (!file || !(file instanceof Blob)) {
+      return new Response(JSON.stringify({ success:false, error:"file 파라미터가 없습니다." }), {
+        status:400, headers:{"Content-Type":"application/json"}
+      });
+    }
+
+    // Google GenAI 인스턴스
+    const ai = new GoogleGenAI({ apiKey: env.GOOGLE_API_KEY });
+    // Blob => ArrayBuffer
+    const arr = await file.arrayBuffer();
+
+    // 1) 업로드
+    const uploadResp = await ai.files.upload({
+      file: arr,
+      config: {
+        mimeType: file.type,
+        filename: file.name || "audio"
+      }
+    });
+
+    // 2) generateContent
+    const genResp = await ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: createUserContent([
+        createPartFromUri(uploadResp.uri, uploadResp.mimeType),
+        "Describe this audio clip in detail."
+      ])
+    });
+
+    const text = genResp.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+    return new Response(JSON.stringify({ success:true, text }), {
+      headers:{"Content-Type":"application/json"}
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({ success:false, error:e.message }), {
+      status:500, headers:{"Content-Type":"application/json"}
+    });
+  }
+}
 
 // =======================
 // 메인 업로드 처리 함수
