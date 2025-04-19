@@ -308,7 +308,7 @@ async function handleImageCensorship(file, env) {
         temperature: 0.1,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 256, // 토큰 수 줄임
+        maxOutputTokens: 256,
       }
     };
 
@@ -338,7 +338,7 @@ async function handleImageCensorship(file, env) {
       };
     }
 
-    return { ok: true }; // 통과
+    return { ok: true };
   } catch (e) {
     console.log("handleImageCensorship error:", e);
     return {
@@ -356,30 +356,14 @@ async function handleImageCensorship(file, env) {
 // =======================
 async function handleVideoCensorship(file, env) {
   try {
-    // (1) 용량 제한 - 50MB
-    if (file.size > 50 * 1024 * 1024) {
-      return {
-        ok: false,
-        response: new Response(JSON.stringify({ 
-          success: false, 
-          error: "영상 용량 50MB 초과" 
-        }), { status: 400 })
-      };
+    // 대용량 영상도 허용: 용량/길이 제한 제거
+    console.log(`비디오 크기: ${(file.size / (1024*1024)).toFixed(2)}MB`);
+    const videoDuration = await getMP4Duration(file);
+    if (videoDuration) {
+      console.log(`비디오 길이: ${videoDuration.toFixed(2)}초`);
     }
 
-    // (2) 동영상 길이 제한 - 5분
-    let videoDuration = await getMP4Duration(file);
-    if (videoDuration && videoDuration > 300) { // 5분 초과
-      return {
-        ok: false,
-        response: new Response(JSON.stringify({ 
-          success: false, 
-          error: "영상 길이 5분 초과" 
-        }), { status: 400 })
-      };
-    }
-
-    // (3) Gemini API 키 확인
+    // Gemini API 키 확인
     const geminiApiKey = env.GEMINI_API_KEY;
     if (!geminiApiKey) {
       return {
@@ -391,92 +375,56 @@ async function handleVideoCensorship(file, env) {
       };
     }
 
-    // (4) 비디오 데이터 준비
+    // 비디오 데이터 준비
     const videoBuffer = await file.arrayBuffer();
     const base64 = arrayBufferToBase64(videoBuffer);
     
-    // (5) 비디오 크기에 따른 적응형 검열 전략
+    // 샘플링 전략: 파일 크기에 따라 2~4개 샘플
     let segments = [];
-    
-    // 비디오 크기 및 길이에 따른 샘플 수 결정
-    // 작은 비디오: 2개 샘플, 중간 비디오: 3개 샘플, 큰 비디오: 4개 샘플
-    let numSamples;
     const fileSizeMB = file.size / (1024 * 1024);
-    
-    if (fileSizeMB <= 5) {
-      numSamples = 2; // 작은 비디오
-    } else if (fileSizeMB <= 15) {
-      numSamples = 3; // 중간 비디오
-    } else {
-      numSamples = 4; // 큰 비디오
-    }
-    
-    console.log(`비디오 크기: ${fileSizeMB.toFixed(2)}MB, 샘플 수: ${numSamples}`);
-    
-    // (6) 샘플 생성 - 항상 시작과 끝 포함
-    // Gemini API가 처리할 수 있는 최대 크기를 고려하여 청크 크기 설정
-    const CHUNK_SIZE = 100000; // 100KB (여러 프레임을 포함할 수 있는 크기)
-    
-    // 시작 부분 샘플 (항상 포함)
-    const startSample = {
+    let numSamples = fileSizeMB <= 5 ? 2 : fileSizeMB <= 15 ? 3 : 4;
+    console.log(`샘플 수 결정: ${numSamples}개`);
+
+    const CHUNK_SIZE = 100000; // 100KB
+
+    // 시작 부분
+    segments.push({
       label: "시작 부분",
       data: base64.substring(0, Math.min(CHUNK_SIZE, base64.length))
-    };
-    segments.push(startSample);
-    
-    // 중간 및 추가 샘플 (필요한 경우)
+    });
+    // 중간 부분
     if (numSamples >= 3 && base64.length > CHUNK_SIZE * 2) {
-      // 중간 샘플 - 비디오 정확히 중간 지점
-      const middleStart = Math.floor(base64.length / 2) - (CHUNK_SIZE / 2);
-      const middleEnd = Math.min(middleStart + CHUNK_SIZE, base64.length);
-      
-      if (middleStart >= 0 && middleEnd <= base64.length && middleEnd > middleStart) {
-        segments.push({
-          label: "중간 부분",
-          data: base64.substring(middleStart, middleEnd)
-        });
-      }
-    }
-    
-    // 큰 비디오에 추가 샘플 (3/4 지점)
-    if (numSamples >= 4 && base64.length > CHUNK_SIZE * 3) {
-      const threeQuarterStart = Math.floor(base64.length * 0.75) - (CHUNK_SIZE / 2);
-      const threeQuarterEnd = Math.min(threeQuarterStart + CHUNK_SIZE, base64.length);
-      
-      if (threeQuarterStart >= 0 && threeQuarterEnd <= base64.length && threeQuarterEnd > threeQuarterStart) {
-        segments.push({
-          label: "75% 지점",
-          data: base64.substring(threeQuarterStart, threeQuarterEnd)
-        });
-      }
-    }
-    
-    // 끝 부분 샘플 (항상 포함)
-    const endStart = Math.max(0, base64.length - CHUNK_SIZE);
-    if (endStart < base64.length) {
+      const mid = Math.floor(base64.length / 2) - (CHUNK_SIZE / 2);
       segments.push({
-        label: "끝 부분",
-        data: base64.substring(endStart)
+        label: "중간 부분",
+        data: base64.substring(mid, Math.min(mid + CHUNK_SIZE, base64.length))
       });
     }
-    
-    // 최종 샘플 수 로그
-    console.log(`비디오 분석: ${segments.length}개 샘플 생성됨`);
-    
-    // (7) 각 샘플 분석
+    // 75% 지점
+    if (numSamples >= 4 && base64.length > CHUNK_SIZE * 3) {
+      const q3 = Math.floor(base64.length * 0.75) - (CHUNK_SIZE / 2);
+      segments.push({
+        label: "75% 지점",
+        data: base64.substring(q3, Math.min(q3 + CHUNK_SIZE, base64.length))
+      });
+    }
+    // 끝 부분
+    segments.push({
+      label: "끝 부분",
+      data: base64.substring(Math.max(0, base64.length - CHUNK_SIZE))
+    });
+
+    console.log(`총 샘플 생성: ${segments.length}개`);
+
+    // 각 샘플 분석
     for (const segment of segments) {
-      console.log(`비디오 ${segment.label} 분석 중...`);
-      
-      // 샘플 크기 확인
-      const sampleSizeKB = (segment.data.length * 3/4) / 1024; // base64는 원본의 약 4/3 크기
-      console.log(`샘플 크기: 약 ${sampleSizeKB.toFixed(2)}KB`);
-      
+      console.log(`샘플 검열 중: ${segment.label}`);
       const requestBody = {
         contents: [
           {
             parts: [
               {
-                text: `이 비디오의 ${segment.label}입니다. 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n각 항목에 대해 true/false만 응답하고, 발견된 유해 콘텐츠가 있다면 간략히 설명해주세요.`
+                text: `이 비디오의 ${segment.label}입니다. 부적절한 콘텐츠 여부를 true/false로 알려주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n발견 시 간략 설명.`
               },
               {
                 inlineData: {
@@ -494,14 +442,9 @@ async function handleVideoCensorship(file, env) {
           maxOutputTokens: 256,
         }
       };
-      
-      // API 호출 (재사용 가능한 함수 사용)
       let analysis = await callGeminiAPI(geminiApiKey, requestBody);
-      
-      // 분석 결과 확인
       if (analysis.success) {
         const inappropriate = isInappropriateContent(analysis.text);
-        
         if (inappropriate.isInappropriate) {
           return {
             ok: false,
@@ -513,15 +456,13 @@ async function handleVideoCensorship(file, env) {
         }
       } else {
         console.log(`${segment.label} 분석 실패: ${analysis.error}`);
-        // 샘플 분석 실패는 치명적이지 않음, 다음 샘플 진행
       }
     }
-    
-    // 모든 샘플 검사 통과
+
     return { ok: true };
   } catch (e) {
     console.log("handleVideoCensorship 오류:", e);
-    // 예상치 못한 오류 발생 시 임시로 허용
+    // 예기치 않은 오류 시 허용 처리
     return { ok: true };
   }
 }
@@ -530,125 +471,59 @@ async function handleVideoCensorship(file, env) {
 async function callGeminiAPI(apiKey, requestBody) {
   let retryCount = 0;
   const maxRetries = 3;
-  const retryDelay = 2000; // 2초 지연
-  
+  const retryDelay = 2000;
+
   while (retryCount < maxRetries) {
     try {
-      // Gemini 2.0 Flash-Lite 모델 사용
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
       const response = await fetch(apiUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
       });
-
       if (!response.ok) {
-        // 할당량 초과 에러 확인 (429)
         if (response.status === 429) {
-          console.log(`API 할당량 초과 에러, 재시도 ${retryCount + 1}/${maxRetries}`);
           retryCount++;
-          
-          // 마지막 시도가 아니면 지연 후 재시도
           if (retryCount < maxRetries) {
-            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            console.log(`할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
+            await new Promise(r => setTimeout(r, retryDelay));
             continue;
           }
         }
-        
         const errText = await response.text();
-        return {
-          success: false,
-          error: `API 오류 (${response.status}): ${errText}`
-        };
+        return { success: false, error: `API 오류 (${response.status}): ${errText}` };
       }
-      
       const data = await response.json();
-      
-      // API 응답 확인 및 결과 분석
-      if (!data.candidates || !data.candidates[0] || !data.candidates[0].content || !data.candidates[0].content.parts) {
-        return {
-          success: false,
-          error: '유효하지 않은 Gemini API 응답'
-        };
+      const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!content) {
+        return { success: false, error: '유효하지 않은 Gemini API 응답' };
       }
-
-      const responseText = data.candidates[0].content.parts[0].text;
-      return {
-        success: true,
-        text: responseText
-      };
+      return { success: true, text: content };
     } catch (e) {
-      console.log(`API 호출 중 오류 발생, 재시도 ${retryCount + 1}/${maxRetries}:`, e);
       retryCount++;
-      
+      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
       if (retryCount < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        await new Promise(r => setTimeout(r, retryDelay));
         continue;
       }
-      
-      return {
-        success: false,
-        error: `API 호출 오류: ${e.message}`
-      };
+      return { success: false, error: `API 호출 오류: ${e.message}` };
     }
   }
-  
-  // 모든 재시도 실패
-  return {
-    success: false,
-    error: '최대 재시도 횟수 초과'
-  };
+  return { success: false, error: '최대 재시도 횟수 초과' };
 }
 
 // =======================
 // 부적절한 내용 분석 함수
 // =======================
 function isInappropriateContent(responseText) {
-  const responseTextLower = responseText.toLowerCase();
+  const txt = responseText.toLowerCase();
   const reasons = [];
-
-  if ((responseTextLower.includes("true") && responseTextLower.includes("노출")) || 
-      (responseTextLower.includes("true") && responseTextLower.includes("선정적")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("성인물")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("nude")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("nudity")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("explicit")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("sexual"))) {
-    reasons.push("선정적 콘텐츠");
-  }
-
-  if ((responseTextLower.includes("true") && responseTextLower.includes("폭력")) || 
-      (responseTextLower.includes("true") && responseTextLower.includes("무기")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("weapon")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("violence"))) {
-    reasons.push("폭력/무기 콘텐츠");
-  }
-
-  if ((responseTextLower.includes("true") && responseTextLower.includes("약물")) || 
-      (responseTextLower.includes("true") && responseTextLower.includes("알코올")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("drug")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("alcohol"))) {
-    reasons.push("약물/알코올 관련 콘텐츠");
-  }
-
-  if ((responseTextLower.includes("true") && responseTextLower.includes("욕설")) || 
-      (responseTextLower.includes("true") && responseTextLower.includes("혐오")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("hate")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("offensive"))) {
-    reasons.push("욕설/혐오 표현");
-  }
-
-  if ((responseTextLower.includes("true") && responseTextLower.includes("유해")) ||
-      (responseTextLower.includes("true") && responseTextLower.includes("harmful"))) {
-    reasons.push("기타 유해 콘텐츠");
-  }
-
-  return {
-    isInappropriate: reasons.length > 0,
-    reasons: reasons
-  };
+  if (txt.includes("true") && /(노출|선정적|nudity|explicit)/.test(txt)) reasons.push("선정적 콘텐츠");
+  if (txt.includes("true") && /(폭력|무기|violence)/.test(txt)) reasons.push("폭력/무기 콘텐츠");
+  if (txt.includes("true") && /(약물|알코올|drug|alcohol)/.test(txt)) reasons.push("약물/알코올 관련 콘텐츠");
+  if (txt.includes("true") && /(욕설|혐오|hate|offensive)/.test(txt)) reasons.push("욕설/혐오 표현");
+  if (txt.includes("true") && /(유해|harmful)/.test(txt)) reasons.push("기타 유해 콘텐츠");
+  return { isInappropriate: reasons.length > 0, reasons };
 }
 
 // =======================
@@ -660,27 +535,22 @@ async function getMP4Duration(file) {
     const dv = new DataView(buffer);
     const uint8 = new Uint8Array(buffer);
     for (let i = 0; i < uint8.length - 4; i++) {
-      // 'm','v','h','d' => 109,118,104,100
       if (uint8[i]===109 && uint8[i+1]===118 && uint8[i+2]===104 && uint8[i+3]===100) {
         const boxStart = i - 4;
         const version = dv.getUint8(boxStart + 8);
-        // version 0
         if (version === 0) {
           const timescale = dv.getUint32(boxStart+20);
           const duration = dv.getUint32(boxStart+24);
           return duration / timescale;
-        }
-        // version 1
-        else if (version === 1) {
+        } else if (version === 1) {
           const timescale = dv.getUint32(boxStart+28);
           const high = dv.getUint32(boxStart+32);
           const low  = dv.getUint32(boxStart+36);
-          const bigDuration = high * 2**32 + low;
-          return bigDuration / timescale;
+          return (high * 2**32 + low) / timescale;
         }
       }
     }
-    return null; // 못 찾음
+    return null;
   } catch(e) {
     console.log("getMP4Duration error:", e);
     return null;
@@ -698,7 +568,7 @@ async function generateUniqueCode(env, length=8) {
       code += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     const existing = await env.IMAGES.get(code);
-    if (!existing) return code; // 중복 없으면 리턴
+    if (!existing) return code;
   }
   throw new Error("코드 생성 실패(10회 시도 모두 중복)");
 }
@@ -747,27 +617,15 @@ function renderHTML(mediaTags, host) {
   
     button {
         background-color: #007BFF;
-        /* color: white; */
-        /* border: none; */
-        /* border-radius: 20px; */
-        /* padding: 10px 20px; */
-        /* margin: 20px 0; */
-        /* width: 600px; */
-        height: 61px;
-        /* box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2); */
         cursor: pointer;
         transition: background-color 0.3s ease, transform 0.1s ease, box-shadow 0.3s ease;
         font-weight: bold;
         font-size: 18px;
         text-align: center;
+        height: 61px;
     }
   
-    button:hover {
-        /* background-color: #005BDD; */
-        /* transform: translateY(2px); */
-        /* box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); */
-    }
-  
+    button:hover {}
     button:active {
       background-color: #0026a3;
       box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
@@ -862,7 +720,7 @@ function renderHTML(mediaTags, host) {
       justify-content: center;
       margin-bottom: 20px;
       font-size: 30px;
-      text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+      text-shadow: 0 2px 4px rgba(0,0,0,0.5);
     }
   
     .header-content img {
@@ -917,7 +775,7 @@ function renderHTML(mediaTags, host) {
     .player-container video {
         width: 40vw;
         height: auto;
-        }
+    }
     /* Custom Context Menu Styles */
     .custom-context-menu {
       position: absolute;
@@ -933,8 +791,6 @@ function renderHTML(mediaTags, host) {
         width: 100%;
         border: none;
         background: none;
-        /* padding: 5px 10px; */
-        text-align: left;
         cursor: pointer;
     }
     .custom-context-menu button:hover {
