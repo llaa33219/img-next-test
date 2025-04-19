@@ -444,11 +444,17 @@ async function callGeminiAPI(apiKey, requestBody) {
   while (retryCount < maxRetries) {
     try {
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+      console.log(`API 호출 시도 ${retryCount + 1}/${maxRetries}`);
+      
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
       });
+      
+      // 응답 상태 로깅
+      console.log(`API 응답 상태: ${response.status}, 타입: ${response.headers.get('Content-Type')}`);
+      
       if (!response.ok) {
         if (response.status === 429 && retryCount < maxRetries - 1) {
           retryCount++;
@@ -456,18 +462,34 @@ async function callGeminiAPI(apiKey, requestBody) {
           await new Promise(r => setTimeout(r, retryDelay));
           continue;
         }
+        
+        // 에러 응답 내용 확인
         const errText = await response.text();
-        return { success: false, error: `API 오류 (${response.status}): ${errText}` };
+        console.error(`API 오류 응답: ${errText.substring(0, 200)}...`);
+        return { success: false, error: `API 오류 (${response.status}): ${errText.substring(0, 100)}` };
       }
+      
+      // Content-Type 확인
+      const contentType = response.headers.get('Content-Type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        console.error(`잘못된 응답 유형: ${contentType}, 응답: ${text.substring(0, 200)}...`);
+        return { success: false, error: `예상치 못한 응답 유형: ${contentType}` };
+      }
+      
       const data = await response.json();
+      console.log(`API 응답 데이터 구조: ${JSON.stringify(Object.keys(data))}`);
+      
       const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!content) {
-        return { success: false, error: '유효하지 않은 Gemini API 응답' };
+        console.error(`콘텐츠 없음: ${JSON.stringify(data).substring(0, 200)}...`);
+        return { success: false, error: '유효하지 않은 Gemini API 응답 (콘텐츠 없음)' };
       }
+      
       return { success: true, text: content };
     } catch (e) {
       retryCount++;
-      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
+      console.error(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
       if (retryCount < maxRetries) {
         await new Promise(r => setTimeout(r, retryDelay));
         continue;
