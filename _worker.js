@@ -157,7 +157,7 @@ async function handleUpload(request, env) {
 
   // =========================
   // 1) 검열: 불량이면 저장 안 하고 에러 반환
-  // =========================
+  // ===========================
   try {
     for (const file of files) {
       if (file.type.startsWith('image/')) {
@@ -311,7 +311,7 @@ async function handleImageCensorship(file, env) {
 }
 
 // =======================
-// 동영상 검열 - Gemini API 사용
+// 동영상 검열 - Gemini API 사용 (수정됨)
 // =======================
 async function handleVideoCensorship(file, env) {
   try {
@@ -335,34 +335,30 @@ async function handleVideoCensorship(file, env) {
     const videoBuffer = await file.arrayBuffer();
     const base64 = arrayBufferToBase64(videoBuffer);
 
-    let segments = [];
+    const segments = [];
     const fileSizeMB = file.size / (1024 * 1024);
-    const numSamples = fileSizeMB <= 5 ? 2 : fileSizeMB <= 15 ? 3 : 4;
+    const numSamples = fileSizeMB <= 5 ? 2 : (fileSizeMB <= 15 ? 3 : 4);
     console.log(`샘플 수 결정: ${numSamples}개`);
 
     const CHUNK_SIZE = 100000;
-
     segments.push({
       label: "시작 부분",
       data: base64.substring(0, Math.min(CHUNK_SIZE, base64.length))
     });
-
     if (numSamples >= 3 && base64.length > CHUNK_SIZE * 2) {
-      const mid = Math.floor(base64.length / 2) - (CHUNK_SIZE / 2);
+      const start = Math.floor((base64.length - CHUNK_SIZE) / 2);
       segments.push({
         label: "중간 부분",
-        data: base64.substring(mid, Math.min(mid + CHUNK_SIZE, base64.length))
+        data: base64.substring(start, start + CHUNK_SIZE)
       });
     }
-
     if (numSamples >= 4 && base64.length > CHUNK_SIZE * 3) {
-      const q3 = Math.floor(base64.length * 0.75) - (CHUNK_SIZE / 2);
+      const start = Math.floor((base64.length - CHUNK_SIZE) * 0.75);
       segments.push({
         label: "75% 지점",
-        data: base64.substring(q3, Math.min(q3 + CHUNK_SIZE, base64.length))
+        data: base64.substring(start, start + CHUNK_SIZE)
       });
     }
-
     segments.push({
       label: "끝 부분",
       data: base64.substring(Math.max(0, base64.length - CHUNK_SIZE))
@@ -396,13 +392,20 @@ async function handleVideoCensorship(file, env) {
         }
       };
 
-      const analysis = await callGeminiAPI(geminiApiKey, requestBody);
-      if (!analysis.success) {
+      let analysis;
+      try {
+        analysis = await callGeminiAPI(geminiApiKey, requestBody);
+        if (!analysis.success) throw new Error(analysis.error);
+      } catch (e) {
+        if (/invalid argument/i.test(e.message)) {
+          console.log(`[검열 경고] ${segment.label} 처리 중 invalid argument 발생, 해당 샘플 건너뜀.`);
+          continue;
+        }
         return {
           ok: false,
           response: new Response(JSON.stringify({
             success: false,
-            error: `동영상 검열 오류 (${segment.label}): ${analysis.error}`
+            error: `동영상 검열 오류 (${segment.label}): ${e.message}`
           }), { status: 500, headers: { 'Content-Type': 'application/json' } })
         };
       }
@@ -432,7 +435,9 @@ async function handleVideoCensorship(file, env) {
   }
 }
 
+// =======================
 // Gemini API 호출 함수 (재시도 로직 포함)
+// =======================
 async function callGeminiAPI(apiKey, requestBody) {
   let retryCount = 0;
   const maxRetries = 3;
