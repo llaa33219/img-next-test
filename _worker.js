@@ -217,10 +217,12 @@ async function handleUpload(request, env) {
 }
 
 // =======================
-// 이미지 검열 - Gemini API 직접 호출
+// 이미지 검열 - Gemini API 사용
 // =======================
 async function handleImageCensorship(file, env) {
   try {
+    const buf = await file.arrayBuffer();
+    const base64 = arrayBufferToBase64(buf);
     const geminiApiKey = env.GEMINI_API_KEY;
     if (!geminiApiKey) {
       return {
@@ -232,10 +234,6 @@ async function handleImageCensorship(file, env) {
       };
     }
 
-    const buf = await file.arrayBuffer();
-    const base64 = arrayBufferToBase64(buf);
-    
-    // 이미지 크기 처리 (3MB 초과시 리사이징)
     let imageBase64 = base64;
     try {
       if (buf.byteLength > 3 * 1024 * 1024) {
@@ -253,7 +251,6 @@ async function handleImageCensorship(file, env) {
       console.log("이미지 리사이징 실패:", e);
     }
 
-    // 향상된 API 요청 구조
     const requestBody = {
       contents: [
         {
@@ -314,7 +311,7 @@ async function handleImageCensorship(file, env) {
 }
 
 // =======================
-// 동영상 검열 - Gemini API 직접 호출
+// 동영상 검열 - Gemini API 사용
 // =======================
 async function handleVideoCensorship(file, env) {
   try {
@@ -444,17 +441,11 @@ async function callGeminiAPI(apiKey, requestBody) {
   while (retryCount < maxRetries) {
     try {
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
-      console.log(`API 호출 시도 ${retryCount + 1}/${maxRetries}`);
-      
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
       });
-      
-      // 응답 상태 로깅
-      console.log(`API 응답 상태: ${response.status}, 타입: ${response.headers.get('Content-Type')}`);
-      
       if (!response.ok) {
         if (response.status === 429 && retryCount < maxRetries - 1) {
           retryCount++;
@@ -462,34 +453,18 @@ async function callGeminiAPI(apiKey, requestBody) {
           await new Promise(r => setTimeout(r, retryDelay));
           continue;
         }
-        
-        // 에러 응답 내용 확인
         const errText = await response.text();
-        console.error(`API 오류 응답: ${errText.substring(0, 200)}...`);
-        return { success: false, error: `API 오류 (${response.status}): ${errText.substring(0, 100)}` };
+        return { success: false, error: `API 오류 (${response.status}): ${errText}` };
       }
-      
-      // Content-Type 확인
-      const contentType = response.headers.get('Content-Type');
-      if (!contentType || !contentType.includes('application/json')) {
-        const text = await response.text();
-        console.error(`잘못된 응답 유형: ${contentType}, 응답: ${text.substring(0, 200)}...`);
-        return { success: false, error: `예상치 못한 응답 유형: ${contentType}` };
-      }
-      
       const data = await response.json();
-      console.log(`API 응답 데이터 구조: ${JSON.stringify(Object.keys(data))}`);
-      
       const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!content) {
-        console.error(`콘텐츠 없음: ${JSON.stringify(data).substring(0, 200)}...`);
-        return { success: false, error: '유효하지 않은 Gemini API 응답 (콘텐츠 없음)' };
+        return { success: false, error: '유효하지 않은 Gemini API 응답' };
       }
-      
       return { success: true, text: content };
     } catch (e) {
       retryCount++;
-      console.error(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
+      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
       if (retryCount < maxRetries) {
         await new Promise(r => setTimeout(r, retryDelay));
         continue;
