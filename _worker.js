@@ -105,7 +105,7 @@ export default {
             mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
           }
           return new Response(renderHTML(mediaTag, url.host), {
-            headers: { "Content-Type": "text/html; charset=UTF-8" }
+            headers: { 'Content-Type': 'text/html; charset=UTF-8' }
           });
         }
       }
@@ -311,126 +311,138 @@ async function handleImageCensorship(file, env) {
 }
 
 // =======================
-// 동영상 검열 - Gemini API 사용 (수정됨)
+// 동영상 검열 - Gemini Video 파일 업로드 API 사용
 // =======================
 async function handleVideoCensorship(file, env) {
   try {
-    console.log(`비디오 크기: ${(file.size / (1024*1024)).toFixed(2)}MB`);
-    const videoDuration = await getMP4Duration(file);
-    if (videoDuration !== null) {
-      console.log(`비디오 길이: ${videoDuration.toFixed(2)}초`);
-    }
-
+    console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     const geminiApiKey = env.GEMINI_API_KEY;
     if (!geminiApiKey) {
       return {
         ok: false,
-        response: new Response(JSON.stringify({
-          success: false,
-          error: 'Gemini API 키가 설정되지 않았습니다.'
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+        response: new Response(
+          JSON.stringify({
+            success: false,
+            error: 'Gemini API 키가 설정되지 않았습니다.',
+          }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        ),
       };
     }
 
-    const videoBuffer = await file.arrayBuffer();
-    const base64 = arrayBufferToBase64(videoBuffer);
-
-    const segments = [];
-    const fileSizeMB = file.size / (1024 * 1024);
-    const numSamples = fileSizeMB <= 5 ? 2 : (fileSizeMB <= 15 ? 3 : 4);
-    console.log(`샘플 수 결정: ${numSamples}개`);
-
-    const CHUNK_SIZE = 100000;
-    segments.push({
-      label: "시작 부분",
-      data: base64.substring(0, Math.min(CHUNK_SIZE, base64.length))
-    });
-    if (numSamples >= 3 && base64.length > CHUNK_SIZE * 2) {
-      const start = Math.floor((base64.length - CHUNK_SIZE) / 2);
-      segments.push({
-        label: "중간 부분",
-        data: base64.substring(start, start + CHUNK_SIZE)
-      });
+    // 1) Resumable upload 시작: 메타데이터 요청
+    const startResp = await fetch(
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiApiKey}`,
+      {
+        method: 'POST',
+        headers: {
+          'X-Goog-Upload-Protocol': 'resumable',
+          'X-Goog-Upload-Command': 'start',
+          'X-Goog-Upload-Header-Content-Length': file.size,
+          'X-Goog-Upload-Header-Content-Type': file.type,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ file: { display_name: 'video_upload' } }),
+      }
+    );
+    if (!startResp.ok) {
+      const err = await startResp.text();
+      throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
     }
-    if (numSamples >= 4 && base64.length > CHUNK_SIZE * 3) {
-      const start = Math.floor((base64.length - CHUNK_SIZE) * 0.75);
-      segments.push({
-        label: "75% 지점",
-        data: base64.substring(start, start + CHUNK_SIZE)
-      });
+    const uploadUrl = startResp.headers.get('X-Goog-Upload-URL');
+    if (!uploadUrl) {
+      throw new Error('Resumable 업로드 URL을 가져올 수 없습니다.');
     }
-    segments.push({
-      label: "끝 부분",
-      data: base64.substring(Math.max(0, base64.length - CHUNK_SIZE))
+
+    // 2) 실제 파일 업로드 및 finalize
+    const buffer = await file.arrayBuffer();
+    const uploadResp = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Length': file.size,
+        'X-Goog-Upload-Offset': '0',
+        'X-Goog-Upload-Command': 'upload, finalize',
+      },
+      body: buffer,
     });
+    if (!uploadResp.ok) {
+      const err = await uploadResp.text();
+      throw new Error(`비디오 업로드 실패: ${uploadResp.status} ${err}`);
+    }
+    let myfile = await uploadResp.json();
 
-    console.log(`총 샘플 생성: ${segments.length}개`);
+    // 3) 파일 처리(PROCESSING → ACTIVE) 대기
+    while (myfile.state === 'PROCESSING') {
+      console.log('비디오 처리 중...');
+      await new Promise((r) => setTimeout(r, 5000));
+      const statusResp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/files/${encodeURIComponent(myfile.name)}?key=${geminiApiKey}`
+      );
+      if (!statusResp.ok) {
+        throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
+      }
+      myfile = await statusResp.json();
+    }
+    if (myfile.state !== 'ACTIVE') {
+      throw new Error(`비디오 파일이 활성 상태가 아닙니다: ${myfile.state}`);
+    }
 
-    for (const segment of segments) {
-      console.log(`샘플 검열 중: ${segment.label}`);
-      const requestBody = {
-        contents: [
-          {
-            parts: [
-              {
-                text: `이 비디오의 ${segment.label}입니다. 부적절한 콘텐츠 여부를 true/false로 알려주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n발견 시 간략 설명.`
+    // 4) Gemini generateContent로 검열 요청
+    const requestBody = {
+      contents: [
+        {
+          parts: [
+            {
+              text:
+                "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 true/false로 알려주세요:\n" +
+                "1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n발견 시 간단히 설명해주세요.",
+            },
+            {
+              file_data: {
+                mime_type: file.type,
+                file_uri: myfile.uri,
               },
-              {
-                inlineData: {
-                  mimeType: file.type,
-                  data: segment.data
-                }
-              }
-            ]
-          }
-        ],
-        generationConfig: {
-          temperature: 0.1,
-          topK: 40,
-          topP: 0.95,
-          maxOutputTokens: 256
-        }
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.1,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 256,
+      },
+    };
+    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
+    if (!analysis.success) {
+      throw new Error(analysis.error);
+    }
+    const inappropriate = isInappropriateContent(analysis.text);
+    if (inappropriate.isInappropriate) {
+      return {
+        ok: false,
+        response: new Response(
+          JSON.stringify({
+            success: false,
+            error: `검열됨: ${inappropriate.reasons.join(', ')}`,
+          }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        ),
       };
-
-      let analysis;
-      try {
-        analysis = await callGeminiAPI(geminiApiKey, requestBody);
-        if (!analysis.success) throw new Error(analysis.error);
-      } catch (e) {
-        if (/invalid argument/i.test(e.message)) {
-          console.log(`[검열 경고] ${segment.label} 처리 중 invalid argument 발생, 해당 샘플 건너뜀.`);
-          continue;
-        }
-        return {
-          ok: false,
-          response: new Response(JSON.stringify({
-            success: false,
-            error: `동영상 검열 오류 (${segment.label}): ${e.message}`
-          }), { status: 500, headers: { 'Content-Type': 'application/json' } })
-        };
-      }
-
-      const inappropriate = isInappropriateContent(analysis.text);
-      if (inappropriate.isInappropriate) {
-        return {
-          ok: false,
-          response: new Response(JSON.stringify({
-            success: false,
-            error: `검열됨 (${segment.label}): ${inappropriate.reasons.join(", ")}`
-          }), { status: 400, headers: { 'Content-Type': 'application/json' } })
-        };
-      }
     }
 
     return { ok: true };
   } catch (e) {
-    console.log("handleVideoCensorship 오류:", e);
+    console.log('handleVideoCensorship 오류:', e);
     return {
       ok: false,
-      response: new Response(JSON.stringify({
-        success: false,
-        error: `동영상 검열 중 오류 발생: ${e.message}`
-      }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      response: new Response(
+        JSON.stringify({
+          success: false,
+          error: `동영상 검열 중 오류 발생: ${e.message}`,
+        }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      ),
     };
   }
 }
@@ -575,47 +587,30 @@ function renderHTML(mediaTags, host) {
       padding: 20px;
       overflow: auto;
     }
-  
     .upload-container {
       display: flex;
       flex-direction: column;
       align-items: center;
     }
-  
     button {
         background-color: #007BFF;
-        /* color: white; */
-        /* border: none; */
-        /* border-radius: 20px; */
-        /* padding: 10px 20px; */
-        /* margin: 20px 0; */
-        /* width: 600px; */
         height: 61px;
-        /* box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2); */
         cursor: pointer;
         transition: background-color 0.3s ease, transform 0.1s ease, box-shadow 0.3s ease;
         font-weight: bold;
         font-size: 18px;
         text-align: center;
     }
-  
-    button:hover {
-        /* background-color: #005BDD; */
-        /* transform: translateY(2px); */
-        /* box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); */
-    }
-  
+    button:hover {}
     button:active {
       background-color: #0026a3;
       box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
     }
-  
     #fileNameDisplay {
       font-size: 16px;
       margin-top: 10px;
       color: #333;
     }
-  
     #linkBox {
       width: 500px;
       height: 40px;
@@ -625,7 +620,6 @@ function renderHTML(mediaTags, host) {
       text-align: center;
       border-radius: 14px;
     }
-  
     .copy-button {
       background: url('https://img.icons8.com/ios-glyphs/30/000000/copy.png') no-repeat center;
       background-size: contain;
@@ -636,13 +630,11 @@ function renderHTML(mediaTags, host) {
       margin-left: 10px;
       vertical-align: middle;
     }
-  
     .link-container {
       display: flex;
       justify-content: center;
       align-items: center;
     }
-    
     #imageContainer img {
       width: 40vw;
       height: auto;
@@ -655,14 +647,12 @@ function renderHTML(mediaTags, host) {
       object-fit: contain;
       cursor: zoom-in;
     }
-  
     #imageContainer img.landscape {
       width: 40vw;
       height: auto;
       max-width: 40vw;
       cursor: zoom-in;
     }
-  
     #imageContainer img.portrait,
     #imageContainer video.portrait {
       width: auto;
@@ -670,7 +660,6 @@ function renderHTML(mediaTags, host) {
       max-width: 40vw;
       cursor: zoom-in;
     }
-  
     #imageContainer img.expanded.landscape,
     #imageContainer video.expanded.landscape {
       width: 80vw;
@@ -679,7 +668,6 @@ function renderHTML(mediaTags, host) {
       max-height: 100vh;
       cursor: zoom-out;
     }
-  
     #imageContainer img.expanded.portrait,
     #imageContainer video.expanded.portrait {
       width: auto;
@@ -688,11 +676,9 @@ function renderHTML(mediaTags, host) {
       max-height: 100vh;
       cursor: zoom-out;
     }
-  
     .container {
       text-align: center;
     }
-  
     .header-content {
       display: flex;
       align-items: center;
@@ -701,12 +687,10 @@ function renderHTML(mediaTags, host) {
       font-size: 30px;
       text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
     }
-  
     .header-content img {
       margin-right: 20px;
       border-radius: 14px;
     }
-  
     .toggle-button {
       background-color: #28a745;
       color: white;
@@ -721,19 +705,15 @@ function renderHTML(mediaTags, host) {
       font-size: 24px;
       margin-left: 20px;
     }
-  
     .hidden {
       display: none;
     }
-  
     .title-img-desktop {
       display: block;
     }
-  
     .title-img-mobile {
       display: none;
     }
-  
     @media (max-width: 768px) {
       button {
         width: 300px;
@@ -770,8 +750,6 @@ function renderHTML(mediaTags, host) {
         width: 100%;
         border: none;
         background: none;
-        /* padding: 5px 10px; */
-        text-align: left;
         cursor: pointer;
     }
     .custom-context-menu button:hover {
@@ -783,7 +761,7 @@ function renderHTML(mediaTags, host) {
 </head>
 <body>
   <div class="header-content">
-    <img src="https://i.imgur.com/2MkyDCh.png" alt="Logo" style="width: 120px; height: auto; cursor: pointer;" onclick="location.href='/';">
+    <img src="https://i.imgur.com/2MkyDCh.png" alt="Logo" style="width: 120px; height: auto; cursor: pointer;" onclick="location.href='/'">
       <h1 class="title-img-desktop">이미지 공유</h1>
       <h1 class="title-img-mobile">이미지<br>공유</h1>
   </div>
