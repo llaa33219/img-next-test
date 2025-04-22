@@ -352,7 +352,7 @@ async function handleVideoCensorship(file, env) {
     }
 
     // 5) 검열 요청
-    const fileUri = uploadResult.uri || uploadUrl;
+    const fileUri = uploadResult.file.uri;
     const requestBody = {
       contents: [{
         parts: [
