@@ -282,13 +282,20 @@ async function handleVideoCensorship(file, env) {
       const err = await startResp.text();
       throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
     }
-    // **변경**: X-Goog-Upload-URL 또는 Location 헤더 중 하나를 사용
-    const uploadUrl =
+    let uploadUrl =
       startResp.headers.get('X-Goog-Upload-URL') ||
       startResp.headers.get('Location');
+
     if (!uploadUrl) {
+      // 헤더에 없으면 JSON 바디에 있는 uploadUri 확인
+      const json = await startResp.json().catch(() => null);
+      uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
+    }
+
+    if (!uploadUrl) {
+      const hdrs = [...startResp.headers].map(([k,v])=>`${k}: ${v}`).join('\n');
       throw new Error(
-        `Resumable 업로드 URL을 가져올 수 없습니다. 응답 헤더: ${[...startResp.headers].map(([k,v])=>k+': '+v).join('; ')}`
+        `Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디(JSON): ${JSON.stringify(await startResp.text())}`
       );
     }
 
