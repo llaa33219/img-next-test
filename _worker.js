@@ -422,15 +422,38 @@ async function callGeminiAPI(apiKey, requestBody) {
   return { success: false, error: '최대 재시도 횟수 초과' };
 }
 
-// 부적절한 내용 분석 함수
+// =======================
+// 부적절한 내용 분석 함수 (교체 버전)
+// =======================
 function isInappropriateContent(responseText) {
-  const txt = responseText.toLowerCase(), reasons = [];
-  if (txt.includes("true") && /(노출|선정적|nudity|explicit)/.test(txt)) reasons.push("선정적 콘텐츠");
-  if (txt.includes("true") && /(폭력|무기|violence)/.test(txt)) reasons.push("폭력/무기 콘텐츠");
-  if (txt.includes("true") && /(약물|알코올|drug|alcohol)/.test(txt)) reasons.push("약물/알코올 관련 콘텐츠");
-  if (txt.includes("true") && /(욕설|혐오|hate|offensive)/.test(txt)) reasons.push("욕설/혐오 표현");
-  if (txt.includes("true") && /(유해|harmful)/.test(txt)) reasons.push("기타 유해 콘텐츠");
-  return { isInappropriate: reasons.length > 0, reasons };
+  // 카테고리 인덱스 → 사용자 표시용 이름 매핑
+  const categoryMap = {
+    1: '선정적 콘텐츠',
+    2: '폭력/무기 콘텐츠',
+    3: '약물/알코올 관련 콘텐츠',
+    4: '욕설/혐오 표현',
+    5: '기타 유해 콘텐츠'
+  };
+
+  // 결과 저장소
+  const flagged = [];
+
+  // 응답을 줄별로 순회하며 "숫자. true/false" 패턴만 파싱
+  responseText.split(/\r?\n/).forEach(line => {
+    const m = line.match(/^\s*([1-5])\.\s*(true|false)\b/i);
+    if (m) {
+      const idx = Number(m[1]);
+      const val = m[2].toLowerCase() === 'true';
+      if (val && categoryMap[idx]) {
+        flagged.push(categoryMap[idx]);
+      }
+    }
+  });
+
+  return {
+    isInappropriate: flagged.length > 0,
+    reasons: flagged
+  };
 }
 
 // MP4 재생길이 간단 추출 함수
