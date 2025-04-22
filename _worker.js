@@ -256,7 +256,7 @@ async function handleImageCensorship(file, env) {
         {
           parts: [
             {
-              text: "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 답해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n각 항목에 대해 true/false만 응답하고, 발견된 유해 콘텐츠가 있다면 간략히 설명해주세요."
+              text: "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 각 항목에 대해 true/false로 응답하고, 발견된 유해 콘텐츠가 있다면 간략히 설명해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠"
             },
             {
               inlineData: {
@@ -369,25 +369,45 @@ async function handleVideoCensorship(file, env) {
       const err = await uploadResp.text();
       throw new Error(`비디오 업로드 실패: ${uploadResp.status} ${err}`);
     }
-    let myfile = await uploadResp.json();
+
+    // 업로드 결과 (name, uri 등) 분리 저장
+    const uploadResult = await uploadResp.json();
+    const fileName = uploadResult.name;
+    if (!fileName) {
+      throw new Error('업로드 완료 후 파일 이름을 확인할 수 없습니다.');
+    }
 
     // 3) 파일 처리(PROCESSING → ACTIVE) 대기
+    let statusResp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/files/${encodeURIComponent(fileName)}?key=${geminiApiKey}`
+    );
+    if (!statusResp.ok) {
+      throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
+    }
+    let myfile = await statusResp.json();
+
     while (myfile.state === 'PROCESSING') {
       console.log('비디오 처리 중...');
       await new Promise((r) => setTimeout(r, 5000));
-      const statusResp = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/files/${encodeURIComponent(myfile.name)}?key=${geminiApiKey}`
+      statusResp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/files/${encodeURIComponent(fileName)}?key=${geminiApiKey}`
       );
       if (!statusResp.ok) {
         throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
       }
       myfile = await statusResp.json();
     }
+
     if (myfile.state !== 'ACTIVE') {
       throw new Error(`비디오 파일이 활성 상태가 아닙니다: ${myfile.state}`);
     }
 
     // 4) Gemini generateContent로 검열 요청
+    const fileUri = uploadResult.uri || uploadResult.uploadUri;
+    if (!fileUri) {
+      throw new Error('검열 요청을 위한 파일 URI를 가져올 수 없습니다.');
+    }
+
     const requestBody = {
       contents: [
         {
@@ -400,7 +420,7 @@ async function handleVideoCensorship(file, env) {
             {
               file_data: {
                 mime_type: file.type,
-                file_uri: myfile.uri,
+                file_uri: fileUri,
               },
             },
           ],
@@ -821,9 +841,7 @@ function renderHTML(mediaTags, host) {
             try {
                 const response = await fetch(currentImage.src);
                 const blob = await response.blob();
-                await navigator.clipboard.write([
-                    new ClipboardItem({ [blob.type]: blob })
-                ]);
+                await navigator.clipboard.write([ new ClipboardItem({ [blob.type]: blob }) ]);
                 alert('이미지 복사됨');
             } catch(err) {
                 alert('이미지 복사 실패: ' + err.message);
