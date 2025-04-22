@@ -324,14 +324,15 @@ async function handleVideoCensorship(file, env) {
 
     // 3) 업로드 완료 응답에서 resource name 추출
     const uploadResult = await uploadResp.json();
-    // uploadResult.name 은 "projects/.../files/..."
-    const resourceName = uploadResult.name;
-    if (!resourceName) {
-      throw new Error(`업로드 완료 후 resource name을 확인할 수 없습니다. 응답: ${JSON.stringify(uploadResult)}`);
-    }
-
+    // file 객체 내부의 name 필드를 사용합니다.
+       const resourceName = uploadResult.file?.name;
+        if (!resourceName) {
+         throw new Error(
+           `업로드 완료 후 resource name을 확인할 수 없습니다. 응답: ${JSON.stringify(uploadResult)}`
+         );
+      }
     // 4) 처리 완료 대기 (PROCESSING → ACTIVE)
-    let statusUrl = `https://generativelanguage.googleapis.com/v1beta/${resourceName}?key=${env.GEMINI_API_KEY}`;
+    const statusUrl = uploadResult.file?.uri + `?key=${env.GEMINI_API_KEY}`;
     let statusResp = await fetch(statusUrl);
     if (!statusResp.ok) {
       throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
