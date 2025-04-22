@@ -287,16 +287,23 @@ async function handleVideoCensorship(file, env) {
       startResp.headers.get('Location');
 
     if (!uploadUrl) {
-      // 헤더에 없으면 JSON 바디에 있는 uploadUri 확인
-      const json = await startResp.json().catch(() => null);
-      uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
-    }
+      // Response 본문을 두 번 읽으려면 clone() 사용
+      const cloneForJson = startResp.clone();
+      const cloneForText = startResp.clone();
 
-    if (!uploadUrl) {
-      const hdrs = [...startResp.headers].map(([k,v])=>`${k}: ${v}`).join('\n');
-      throw new Error(
-        `Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디(JSON): ${JSON.stringify(await startResp.text())}`
-      );
+      // JSON 바디에서 가능한 필드 확인
+      const json = await cloneForJson.json().catch(() => null);
+      uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
+
+      if (!uploadUrl) {
+        const hdrs = [...startResp.headers]
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\n');
+        const textBody = await cloneForText.text().catch(() => '');
+        throw new Error(
+          `Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디:\n${textBody}`
+        );
+      }
     }
 
     // 2) 파일 업로드 및 finalize
