@@ -509,41 +509,349 @@ function arrayBufferToBase64(buffer) {
 // 최종 HTML 렌더
 function renderHTML(mediaTags, host) {
   return `<!DOCTYPE html>
-<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="https://i.imgur.com/2MkyDCh.png" type="image/png">
-<title>이미지 공유</title><style>
-body{display:flex;flex-direction:column;align-items:center;margin:0;padding:20px;overflow:auto}
-header{display:flex;align-items:center;margin-bottom:20px;font-size:30px;text-shadow:0 2px 4px rgba(0,0,0,0.5)}
-header img{margin-right:20px;border-radius:14px;cursor:pointer}
-#imageContainer img,#imageContainer video{cursor:zoom-in;transition:all .3s ease}
-.landscape{width:40vw;height:auto;max-width:40vw}
-.portrait{width:auto;height:50vh;max-width:40vw}
-.expanded.landscape{width:80vw!important;height:auto!important}
-.expanded.portrait{width:auto!important;height:100vh!important;max-width:80vw!important}
-.custom-context-menu{position:absolute;background:#fff;border:1px solid #ccc;padding:5px;box-shadow:0 2px 5px rgba(0,0,0,0.2);border-radius:10px;display:none;z-index:1000}
-.custom-context-menu button{display:block;width:100%;border:none;background:none;cursor:pointer}
-.custom-context-menu button:hover{background:#eee}
-@media(max-width:768px){header{font-size:23px}}
-</style>
-<script src="https://llaa33219.github.io/BLOUplayer/videoPlayer.js"></script>
-<link rel="stylesheet" href="https://llaa33219.github.io/BLOUplayer/videoPlayer.css">
-</head><body>
-<header onclick="location.href='/'"><img src="https://i.imgur.com/2MkyDCh.png" width="120"><span>이미지 공유</span></header>
-<div id="imageContainer">${mediaTags}</div>
-<div class="custom-context-menu" id="customContextMenu">
-  <button id="copyImage">이미지 복사</button>
-  <button id="copyImageurl">이미지 링크 복사</button>
-  <button id="downloadImage">다운로드</button>
-  <button id="downloadImagepng">png로 다운로드</button>
-</div>
-<script>
-function toggleZoom(el){if(!el.classList.contains('landscape')&&!el.classList.contains('portrait')){let w=el.tagName==='IMG'?el.naturalWidth:el.videoWidth;let h=el.tagName==='IMG'?el.naturalHeight:el.videoHeight;el.classList.add(w>=h?'landscape':'portrait')}el.classList.toggle('expanded')}
-const menu=document.getElementById('customContextMenu');let curr=null;
-document.getElementById('imageContainer').addEventListener('contextmenu',e=>{if(e.target.tagName==='IMG'){e.preventDefault();curr=e.target;menu.style.top=e.pageY+'px';menu.style.left=e.pageX+'px';menu.style.display='block'}})
-document.addEventListener('click',()=>menu.style.display='none');
-document.getElementById('copyImage').onclick=async()=>{if(curr){try{const r=await fetch(curr.src),b=await r.blob();await navigator.clipboard.write([new ClipboardItem({[b.type]:b})]);alert('이미지 복사됨')}catch(e){alert('복사 실패:'+e.message)}}};
-document.getElementById('copyImageurl').onclick=async()=>{if(curr){try{await navigator.clipboard.writeText(curr.src);alert('링크 복사됨')}catch(e){alert('복사 실패:'+e.message)}}};
-document.getElementById('downloadImage').onclick=()=>{if(curr){const a=document.createElement('a');a.href=curr.src;a.download='image';document.body.appendChild(a);a.click();a.remove();}};
-document.getElementById('downloadImagepng').onclick=()=>{if(curr){const canvas=document.createElement('canvas'),img=new Image();img.crossOrigin='anonymous';img.onload=()=>{canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0);canvas.toBlob(b=>{const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='image.png';document.body.appendChild(a);a.click();a.remove()},'image/png')};img.src=curr.src;}};
-</script></body></html>`;
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="https://i.imgur.com/2MkyDCh.png" type="image/png">
+  <title>이미지 공유</title>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      padding: 20px;
+      overflow: auto;
+    }
+  
+    .upload-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+  
+    button {
+        background-color: #007BFF;
+        /* color: white; */
+        /* border: none; */
+        /* border-radius: 20px; */
+        /* padding: 10px 20px; */
+        /* margin: 20px 0; */
+        /* width: 600px; */
+        height: 61px;
+        /* box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2); */
+        cursor: pointer;
+        transition: background-color 0.3s ease, transform 0.1s ease, box-shadow 0.3s ease;
+        font-weight: bold;
+        font-size: 18px;
+        text-align: center;
+    }
+  
+    button:hover {
+        /* background-color: #005BDD; */
+        /* transform: translateY(2px); */
+        /* box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); */
+    }
+  
+    button:active {
+      background-color: #0026a3;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    }
+  
+    #fileNameDisplay {
+      font-size: 16px;
+      margin-top: 10px;
+      color: #333;
+    }
+  
+    #linkBox {
+      width: 500px;
+      height: 40px;
+      margin: 20px 0;
+      font-size: 16px;
+      padding: 10px;
+      text-align: center;
+      border-radius: 14px;
+    }
+  
+    .copy-button {
+      background: url('https://img.icons8.com/ios-glyphs/30/000000/copy.png') no-repeat center;
+      background-size: contain;
+      border: none;
+      cursor: pointer;
+      width: 60px;
+      height: 40px;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+  
+    .link-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    
+    #imageContainer img {
+      width: 40vw;
+      height: auto;
+      max-width: 40vw;
+      max-height: 50vh;
+      display: block;
+      margin: 20px auto;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      object-fit: contain;
+      cursor: zoom-in;
+    }
+  
+    #imageContainer img.landscape {
+      width: 40vw;
+      height: auto;
+      max-width: 40vw;
+      cursor: zoom-in;
+    }
+  
+    #imageContainer img.portrait,
+    #imageContainer video.portrait {
+      width: auto;
+      height: 50vh;
+      max-width: 40vw;
+      cursor: zoom-in;
+    }
+  
+    #imageContainer img.expanded.landscape,
+    #imageContainer video.expanded.landscape {
+      width: 80vw;
+      height: auto;
+      max-width: 80vw;
+      max-height: 100vh;
+      cursor: zoom-out;
+    }
+  
+    #imageContainer img.expanded.portrait,
+    #imageContainer video.expanded.portrait {
+      width: auto;
+      height: 100vh;
+      max-width: 80vw;
+      max-height: 100vh;
+      cursor: zoom-out;
+    }
+  
+    .container {
+      text-align: center;
+    }
+  
+    .header-content {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 20px;
+      font-size: 30px;
+      text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+    }
+  
+    .header-content img {
+      margin-right: 20px;
+      border-radius: 14px;
+    }
+  
+    .toggle-button {
+      background-color: #28a745;
+      color: white;
+      border: none;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      display: none;
+      justify-content: center;
+      align-items: center;
+      cursor: pointer;
+      font-size: 24px;
+      margin-left: 20px;
+    }
+  
+    .hidden {
+      display: none;
+    }
+  
+    .title-img-desktop {
+      display: block;
+    }
+  
+    .title-img-mobile {
+      display: none;
+    }
+  
+    @media (max-width: 768px) {
+      button {
+        width: 300px;
+      }
+      #linkBox {
+        width: 200px;
+      }
+      .header-content {
+        font-size: 23px;
+      }
+      .title-img-desktop {
+        display: none;
+      }
+      .title-img-mobile {
+        display: block;
+      }
+    }
+    .player-container video {
+        width: 40vw;
+        height: auto;
+        }
+    /* Custom Context Menu Styles */
+    .custom-context-menu {
+      position: absolute;
+      background: white;
+      border: 1px solid #ccc;
+      padding: 5px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+      z-index: 1000;
+      border-radius: 10px;
+    }
+    .custom-context-menu button {
+        display: block;
+        width: 100%;
+        border: none;
+        background: none;
+        /* padding: 5px 10px; */
+        text-align: left;
+        cursor: pointer;
+    }
+    .custom-context-menu button:hover {
+      background: #eee;
+    }
+  </style>
+  <link rel="stylesheet" href="https://llaa33219.github.io/BLOUplayer/videoPlayer.css">
+  <script src="https://llaa33219.github.io/BLOUplayer/videoPlayer.js"></script>
+</head>
+<body>
+  <div class="header-content">
+    <img src="https://i.imgur.com/2MkyDCh.png" alt="Logo" style="width: 120px; height: auto; cursor: pointer;" onclick="location.href='/';">
+      <h1 class="title-img-desktop">이미지 공유</h1>
+      <h1 class="title-img-mobile">이미지<br>공유</h1>
+  </div>
+  <div id="imageContainer">
+    ${mediaTags}
+  </div>
+  <div class="custom-context-menu" id="customContextMenu" style="display: none;">
+      <button id="copyImage">이미지 복사</button>
+      <button id="copyImageurl">이미지 링크 복사</button>
+      <button id="downloadImage">다운로드</button>
+      <button id="downloadImagepng">png로 다운로드</button>
+  </div>
+  <script>
+    function toggleZoom(elem) {
+      if (!elem.classList.contains('landscape') && !elem.classList.contains('portrait')) {
+        let width=0, height=0;
+        if (elem.tagName.toLowerCase()==='img') {
+          width=elem.naturalWidth; height=elem.naturalHeight;
+        } else if (elem.tagName.toLowerCase()==='video') {
+          width=elem.videoWidth; height=elem.videoHeight;
+        }
+        if(width && height){
+          if(width>=height) elem.classList.add('landscape');
+          else elem.classList.add('portrait');
+        }
+      }
+      elem.classList.toggle('expanded');
+    }
+    document.getElementById('toggleButton')?.addEventListener('click',function(){
+      window.location.href='/';
+    });
+    
+    // Custom Context Menu Functionality
+    let currentImage = null;
+    const contextMenu = document.getElementById('customContextMenu');
+
+    document.getElementById('imageContainer').addEventListener('contextmenu', function(e) {
+        if(e.target.tagName.toLowerCase() === 'img'){
+            e.preventDefault();
+            currentImage = e.target;
+            contextMenu.style.top = e.pageY + 'px';
+            contextMenu.style.left = e.pageX + 'px';
+            contextMenu.style.display = 'block';
+        }
+    });
+
+    // Hide context menu on document click
+    document.addEventListener('click', function(e) {
+        if(contextMenu.style.display === 'block'){
+            contextMenu.style.display = 'none';
+        }
+    });
+
+    // "이미지 복사" 버튼 클릭
+    document.getElementById('copyImage').addEventListener('click', async function(){
+        if(currentImage){
+            try {
+                const response = await fetch(currentImage.src);
+                const blob = await response.blob();
+                await navigator.clipboard.write([
+                    new ClipboardItem({ [blob.type]: blob })
+                ]);
+                alert('이미지 복사됨');
+            } catch(err) {
+                alert('이미지 복사 실패: ' + err.message);
+            }
+        }
+    });
+
+    // "이미지 링크 복사" 버튼 클릭
+    document.getElementById('copyImageurl').addEventListener('click', async function(){
+        if(currentImage){
+            try {
+                await navigator.clipboard.writeText(currentImage.src);
+                alert('이미지 링크 복사됨');
+            } catch(err) {
+                alert('이미지 링크 복사 실패: ' + err.message);
+            }
+        }
+    });
+
+    // "다운로드" 버튼 클릭 (원본 이미지 다운로드)
+    document.getElementById('downloadImage').addEventListener('click', function(){
+        if(currentImage){
+            const a = document.createElement('a');
+            a.href = currentImage.src;
+            a.download = 'image';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }
+    });
+
+    // "png로 다운로드" 버튼 클릭 (이미지를 png로 변환하여 다운로드)
+    document.getElementById('downloadImagepng').addEventListener('click', function(){
+        if(currentImage){
+            const canvas = document.createElement('canvas');
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            img.onload = function(){
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                canvas.toBlob(function(blob){
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = 'image.png';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                }, 'image/png');
+            };
+            img.src = currentImage.src;
+        }
+    });
+  </script>
+</body>
+</html>`;
 }
