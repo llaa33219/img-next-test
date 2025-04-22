@@ -220,7 +220,15 @@ async function handleImageCensorship(file, env) {
     const requestBody = {
       contents: [{
         parts: [
-          { text: "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 true/false로 응답하고, 발견된 유해 콘텐츠가 있다면 설명해주세요:\n1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오\n5. 기타" },
+          { text:
+            "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 true/false로 알려주세요:\n" +
+            "1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n발견 시 간단히 설명해주세요. **추가 설명 금지**:\n" +
+            "1. true/false\n" +
+            "2. true/false\n" +
+            "3. true/false\n" +
+            "4. true/false\n" +
+            "5. true/false\n",
+           },
           { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
       }],
