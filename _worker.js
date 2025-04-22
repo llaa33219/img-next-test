@@ -266,7 +266,7 @@ async function handleVideoCensorship(file, env) {
 
     // 1) Resumable upload 시작
     const startResp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/files?key=${geminiApiKey}`,
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
       { method: 'POST',
         headers: {
           'X-Goog-Upload-Protocol': 'resumable',
