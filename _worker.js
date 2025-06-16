@@ -3,6 +3,111 @@
 // ==============================
 const requestsInProgress = {};
 
+// ==============================
+// 전역: 레이트 리미팅 관리 Map
+// ==============================
+const rateLimitData = new Map(); // IP별 요청 기록
+const blockedIPs = new Map(); // 차단된 IP와 해제 시간
+
+// 레이트 리미팅 검사 함수
+function checkRateLimit(clientIP) {
+  const now = Date.now();
+  
+  // 차단된 IP 확인
+  if (blockedIPs.has(clientIP)) {
+    const blockInfo = blockedIPs.get(clientIP);
+    if (now < blockInfo.unblockTime) {
+      const remainingTime = Math.ceil((blockInfo.unblockTime - now) / 1000);
+      return {
+        blocked: true,
+        reason: blockInfo.reason,
+        remainingTime: remainingTime
+      };
+    } else {
+      // 차단 시간이 지났으므로 해제
+      blockedIPs.delete(clientIP);
+    }
+  }
+  
+  // 현재 IP의 요청 기록 가져오기 또는 생성
+  if (!rateLimitData.has(clientIP)) {
+    rateLimitData.set(clientIP, {
+      requests: [],
+      lastCleanup: now
+    });
+  }
+  
+  const ipData = rateLimitData.get(clientIP);
+  
+  // 오래된 요청 기록 정리 (1시간 이상 된 것)
+  if (now - ipData.lastCleanup > 60000) { // 1분마다 정리
+    ipData.requests = ipData.requests.filter(time => now - time < 3600000); // 1시간
+    ipData.lastCleanup = now;
+  }
+  
+  // 현재 요청 추가
+  ipData.requests.push(now);
+  
+  // 1분 내 요청 수 확인 (20개 초과시 5분 차단)
+  const oneMinuteAgo = now - 60000;
+  const recentRequests = ipData.requests.filter(time => time > oneMinuteAgo);
+  
+  if (recentRequests.length > 20) {
+    const unblockTime = now + (5 * 60 * 1000); // 5분 후
+    blockedIPs.set(clientIP, {
+      unblockTime: unblockTime,
+      reason: '1분 내 20개 초과 업로드'
+    });
+    return {
+      blocked: true,
+      reason: '1분 내 20개 초과 업로드로 인한 5분 차단',
+      remainingTime: 300
+    };
+  }
+  
+  // 1시간 내 요청 수 확인 (100개 초과시 1시간 차단)
+  const oneHourAgo = now - 3600000;
+  const hourlyRequests = ipData.requests.filter(time => time > oneHourAgo);
+  
+  if (hourlyRequests.length > 100) {
+    const unblockTime = now + (60 * 60 * 1000); // 1시간 후
+    blockedIPs.set(clientIP, {
+      unblockTime: unblockTime,
+      reason: '1시간 내 100개 초과 업로드'
+    });
+    return {
+      blocked: true,
+      reason: '1시간 내 100개 초과 업로드로 인한 1시간 차단',
+      remainingTime: 3600
+    };
+  }
+  
+  return { blocked: false };
+}
+
+// 메모리 정리 함수 (주기적으로 호출)
+function cleanupOldData() {
+  const now = Date.now();
+  const oneHourAgo = now - 3600000;
+  
+  // 오래된 요청 기록 정리
+  for (const [ip, data] of rateLimitData.entries()) {
+    data.requests = data.requests.filter(time => time > oneHourAgo);
+    if (data.requests.length === 0) {
+      rateLimitData.delete(ip);
+    }
+  }
+  
+  // 만료된 차단 기록 정리
+  for (const [ip, blockInfo] of blockedIPs.entries()) {
+    if (now >= blockInfo.unblockTime) {
+      blockedIPs.delete(ip);
+    }
+  }
+  
+  console.log(`[Cleanup] 레이트 리미팅 데이터 정리 완료. 활성 IP: ${rateLimitData.size}, 차단된 IP: ${blockedIPs.size}`);
+}
+
 // CORS 헤더 추가 함수
 function addCorsHeaders(response) {
   const headers = new Headers(response.headers);
@@ -20,6 +125,13 @@ function addCorsHeaders(response) {
 
 export default {
   async fetch(request, env, ctx) {
+    // 주기적으로 메모리 정리 (10분마다)
+    const now = Date.now();
+    if (!this.lastCleanup || now - this.lastCleanup > 600000) {
+      ctx.waitUntil(Promise.resolve().then(() => cleanupOldData()));
+      this.lastCleanup = now;
+    }
+    
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/$/, '');
 
@@ -38,6 +150,27 @@ export default {
 
     // 1) [POST] /upload 또는 /upload/ => 업로드 처리 (웹 인터페이스)
     if (request.method === 'POST' && path === '/upload') {
+      // 클라이언트 IP 가져오기
+      const clientIP = request.headers.get('CF-Connecting-IP') || 
+                      request.headers.get('X-Forwarded-For') || 
+                      request.headers.get('X-Real-IP') || 
+                      'unknown';
+      
+      // 레이트 리미팅 검사
+      const rateLimitResult = checkRateLimit(clientIP);
+      if (rateLimitResult.blocked) {
+        console.log(`[Rate Limit] IP ${clientIP} 차단됨: ${rateLimitResult.reason}`);
+        return new Response(JSON.stringify({
+          success: false,
+          error: `보안상 업로드가 제한되었습니다. ${rateLimitResult.reason}. ${rateLimitResult.remainingTime}초 후 다시 시도하세요.`,
+          rateLimited: true,
+          remainingTime: rateLimitResult.remainingTime
+        }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
       // 요청이 웹 인터페이스에서 왔는지 외부에서 왔는지 확인
       const isExternalRequest = request.headers.get('Origin') && 
                                !request.headers.get('Origin').includes(url.host);
@@ -83,6 +216,28 @@ export default {
 
     // 2) [POST] /api/upload => API 전용 업로드 엔드포인트 (외부용)
     else if (request.method === 'POST' && path === '/api/upload') {
+      // 클라이언트 IP 가져오기
+      const clientIP = request.headers.get('CF-Connecting-IP') || 
+                      request.headers.get('X-Forwarded-For') || 
+                      request.headers.get('X-Real-IP') || 
+                      'unknown';
+      
+      // 레이트 리미팅 검사
+      const rateLimitResult = checkRateLimit(clientIP);
+      if (rateLimitResult.blocked) {
+        console.log(`[Rate Limit] API IP ${clientIP} 차단됨: ${rateLimitResult.reason}`);
+        const response = new Response(JSON.stringify({
+          success: false,
+          error: `보안상 업로드가 제한되었습니다. ${rateLimitResult.reason}. ${rateLimitResult.remainingTime}초 후 다시 시도하세요.`,
+          rateLimited: true,
+          remainingTime: rateLimitResult.remainingTime
+        }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json' }
+        });
+        return addCorsHeaders(response);
+      }
+      
       const response = await handleUpload(request, env);
       return addCorsHeaders(response);
     }
@@ -1107,6 +1262,25 @@ function renderApiDocs(host) {
   "success": false,
   "error": "검열 처리 중 오류: [오류 메시지]"
 }</pre>
+    
+    <p>레이트 리미팅 (429 Too Many Requests):</p>
+    <pre>{
+  "success": false,
+  "error": "보안상 업로드가 제한되었습니다. 1분 내 20개 초과 업로드로 인한 5분 차단. 300초 후 다시 시도하세요.",
+  "rateLimited": true,
+  "remainingTime": 300
+}</pre>
+  </div>
+  
+  <h2>레이트 리미팅</h2>
+  <div class="endpoint">
+    <h3>업로드 제한</h3>
+    <p>보안을 위해 다음과 같은 레이트 리미팅이 적용됩니다:</p>
+    <ul>
+      <li><strong>1분 제한:</strong> 동일한 IP에서 1분 내 20개 이상 업로드 시 5분간 차단</li>
+      <li><strong>1시간 제한:</strong> 동일한 IP에서 1시간 내 100개 이상 업로드 시 1시간 차단</li>
+    </ul>
+    <p>제한 초과 시 HTTP 429 상태 코드와 함께 차단 해제까지 남은 시간이 응답됩니다.</p>
   </div>
   
   <h2>코드 예제</h2>
