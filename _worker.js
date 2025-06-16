@@ -276,13 +276,13 @@ async function handleImageCensorship(file, env) {
       contents: [{
         parts: [
           { text:
-            "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 true/false로 알려주세요:\n" +
-            "1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n발견 시 간단히 설명해주세요. **추가 설명 금지**:\n" +
-            "1. true/false\n" +
-            "2. true/false\n" +
-            "3. true/false\n" +
-            "4. true/false\n" +
-            "5. true/false\n",
+            "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
+            "1. 노출/선정적 이미지: true/false\n" +
+            "2. 폭력/무기: true/false\n" +
+            "3. 약물/알코올: true/false\n" +
+            "4. 욕설/혐오 표현: true/false\n" +
+            "5. 기타 유해 콘텐츠: true/false\n\n" +
+            "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
            },
           { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
@@ -420,13 +420,13 @@ async function handleVideoCensorship(file, env) {
       contents: [{
         parts: [
           { text:
-              "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 다음 카테고리에 해당하는 내용이 있으면 true/false로 알려주세요:\n" +
-              "1. 노출/선정적 이미지\n2. 폭력/무기\n3. 약물/알코올\n4. 욕설/혐오 표현\n5. 기타 유해 콘텐츠\n\n발견 시 간단히 설명해주세요. **추가 설명 금지**:\n" +
-              "1. true/false\n" +
-              "2. true/false\n" +
-              "3. true/false\n" +
-              "4. true/false\n" +
-              "5. true/false\n",
+              "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
+              "1. 노출/선정적 이미지: true/false\n" +
+              "2. 폭력/무기: true/false\n" +
+              "3. 약물/알코올: true/false\n" +
+              "4. 욕설/혐오 표현: true/false\n" +
+              "5. 기타 유해 콘텐츠: true/false\n\n" +
+              "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
              },
           { file_data: { mime_type: file.type, file_uri: fileUri } }
         ]
@@ -476,7 +476,9 @@ async function callGeminiAPI(apiKey, requestBody) {
       }
       const data = await response.json();
       const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!content) return { success: false, error: '유효하지 않은 Gemini API 응답' };
+      if (!content) {
+        return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
+      }
       return { success: true, text: content };
     } catch (e) {
       retryCount++;
@@ -507,9 +509,29 @@ function isInappropriateContent(responseText) {
   // 결과 저장소
   const flagged = [];
 
-  // 응답을 줄별로 순회하며 "숫자. true/false" 패턴만 파싱
+  // 응답을 줄별로 순회하며 다양한 패턴 파싱
   responseText.split(/\r?\n/).forEach(line => {
-    const m = line.match(/^\s*([1-5])\.\s*(true|false)\b/i);
+    // 패턴 1: "숫자. true/false" 형태
+    let m = line.match(/^\s*([1-5])\.\s*(true|false)\b/i);
+    if (!m) {
+      // 패턴 2: "숫자: true/false" 형태
+      m = line.match(/^\s*([1-5]):\s*(true|false)\b/i);
+    }
+    if (!m) {
+      // 패턴 3: "숫자 - true/false" 형태
+      m = line.match(/^\s*([1-5])\s*[-–]\s*(true|false)\b/i);
+    }
+    if (!m) {
+      // 패턴 4: 단순히 "true" 또는 "false"만 있는 경우 (순서대로 1-5 매핑)
+      const trueMatch = line.match(/^\s*(true|false)\b/i);
+      if (trueMatch) {
+        const lineIndex = responseText.split(/\r?\n/).indexOf(line);
+        if (lineIndex >= 0 && lineIndex < 5) {
+          m = [null, (lineIndex + 1).toString(), trueMatch[1]];
+        }
+      }
+    }
+    
     if (m) {
       const idx = Number(m[1]);
       const val = m[2].toLowerCase() === 'true';
