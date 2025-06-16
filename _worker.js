@@ -458,7 +458,7 @@ async function callGeminiAPI(apiKey, requestBody) {
   const maxRetries = 3, retryDelay = 2000;
   while (retryCount < maxRetries) {
     try {
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-04-17:generateContent?key=${apiKey}`;
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -471,12 +471,27 @@ async function callGeminiAPI(apiKey, requestBody) {
           await new Promise(r => setTimeout(r, retryDelay));
           continue;
         }
+        console.log('Gemini API 호출 실패:', {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries([...response.headers])
+        });
         const errText = await response.text();
-        return { success: false, error: `API 오류 (${response.status}): ${errText}` };
+        return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
       const data = await response.json();
       const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!content) {
+        // 안전한 디버깅 정보만 로그
+        console.log('Gemini API 응답 상태:', {
+          hasCandidates: !!data.candidates,
+          candidatesLength: data.candidates?.length || 0,
+          hasContent: !!data.candidates?.[0]?.content,
+          hasParts: !!data.candidates?.[0]?.content?.parts,
+          partsLength: data.candidates?.[0]?.content?.parts?.length || 0,
+          hasText: !!data.candidates?.[0]?.content?.parts?.[0]?.text,
+          responseKeys: Object.keys(data || {})
+        });
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
       return { success: true, text: content };
