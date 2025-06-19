@@ -658,6 +658,7 @@ async function callGeminiAPI(apiKey, requestBody) {
           headers: Object.fromEntries([...response.headers])
         });
         const errText = await response.text();
+        console.error('Gemini API 오류 응답 본문:', errText);
         return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
       const data = await response.json();
@@ -673,6 +674,7 @@ async function callGeminiAPI(apiKey, requestBody) {
           hasText: !!data.candidates?.[0]?.content?.parts?.[0]?.text,
           responseKeys: Object.keys(data || {})
         });
+        console.error('전체 API 응답:', JSON.stringify(data, null, 2));
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
       return { success: true, text: content };
