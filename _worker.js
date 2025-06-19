@@ -429,7 +429,7 @@ async function handleImageCensorship(file, env) {
 
     const requestBody = {
       contents: [{
-        role: 'user',
+        role: "user",
         parts: [
           { text:
             "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -580,7 +580,7 @@ async function handleVideoCensorship(file, env) {
     const fileUri = uploadResult.file.uri;
     const requestBody = {
       contents: [{
-        role: 'user',
+        role: "user",
         parts: [
           { text:
               "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -591,7 +591,7 @@ async function handleVideoCensorship(file, env) {
               "5. 기타 유해 콘텐츠: true/false\n\n" +
               "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
              },
-          { fileData: { mimeType: file.type, fileUri: fileUri } }
+          { file_data: { mime_type: file.type, file_uri: fileUri } }
         ]
       }],
       generationConfig: { 
@@ -628,18 +628,6 @@ async function callGeminiAPI(apiKey, requestBody) {
   while (retryCount < maxRetries) {
     try {
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-      
-      // 요청 로그 (API 키 제외) - 안전하게
-      try {
-        console.log('=== Gemini API 요청 구조 ===');
-        console.log('URL:', apiUrl.replace(/key=.*/, 'key=***'));
-        console.log('Body keys:', Object.keys(requestBody));
-        console.log('Contents length:', requestBody.contents?.length || 0);
-        console.log('=== 요청 구조 끝 ===');
-      } catch (logError) {
-        console.log('로그 출력 오류:', logError.message);
-      }
-      
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -661,69 +649,7 @@ async function callGeminiAPI(apiKey, requestBody) {
         return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
       const data = await response.json();
-      
-      // 실제 응답 구조 확인을 위한 임시 로그 - 안전하게
-      try {
-        console.log('=== Gemini API 응답 구조 ===');
-        console.log('Response keys:', Object.keys(data));
-        if (data.candidates) {
-          console.log('Candidates length:', data.candidates.length);
-          if (data.candidates[0]) {
-            console.log('First candidate keys:', Object.keys(data.candidates[0]));
-            if (data.candidates[0].content) {
-              console.log('Content keys:', Object.keys(data.candidates[0].content));
-              if (data.candidates[0].content.parts) {
-                console.log('Parts length:', data.candidates[0].content.parts.length);
-                if (data.candidates[0].content.parts[0]) {
-                  console.log('First part keys:', Object.keys(data.candidates[0].content.parts[0]));
-                  if (data.candidates[0].content.parts[0].text) {
-                    console.log('Text found:', data.candidates[0].content.parts[0].text.substring(0, 100) + '...');
-                  }
-                }
-              }
-            }
-          }
-        }
-        console.log('=== 응답 구조 확인 끝 ===');
-      } catch (logError) {
-        console.log('응답 로그 출력 오류:', logError.message);
-        console.log('Raw response:', JSON.stringify(data).substring(0, 200) + '...');
-      }
-      
-      // 다양한 응답 구조 시도
-      let content = null;
-      
-      // 기존 구조 시도
-      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        content = data.candidates[0].content.parts[0].text;
-      }
-      // 새로운 구조 시도 1: text 필드가 직접 있는 경우
-      else if (data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data) {
-        content = data.candidates[0].content.parts[0].inlineData.data;
-      }
-      // 새로운 구조 시도 2: response 필드가 있는 경우
-      else if (data.response?.text) {
-        content = data.response.text;
-      }
-      // 새로운 구조 시도 3: text 필드가 최상위에 있는 경우
-      else if (data.text) {
-        content = data.text;
-      }
-      // 새로운 구조 시도 4: candidates[0].text가 직접 있는 경우
-      else if (data.candidates?.[0]?.text) {
-        content = data.candidates[0].text;
-      }
-      // 새로운 구조 시도 5: parts에서 text만 추출
-      else if (data.candidates?.[0]?.content?.parts) {
-        const parts = data.candidates[0].content.parts;
-        for (const part of parts) {
-          if (part.text) {
-            content = part.text;
-            break;
-          }
-        }
-      }
-      
+      const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!content) {
         // 안전한 디버깅 정보만 로그
         console.log('Gemini API 응답 상태:', {
@@ -733,8 +659,7 @@ async function callGeminiAPI(apiKey, requestBody) {
           hasParts: !!data.candidates?.[0]?.content?.parts,
           partsLength: data.candidates?.[0]?.content?.parts?.length || 0,
           hasText: !!data.candidates?.[0]?.content?.parts?.[0]?.text,
-          responseKeys: Object.keys(data || {}),
-          fullResponse: JSON.stringify(data).substring(0, 500) + '...'
+          responseKeys: Object.keys(data || {})
         });
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
