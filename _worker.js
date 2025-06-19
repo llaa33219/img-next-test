@@ -440,7 +440,7 @@ async function handleImageCensorship(file, env) {
             "5. 기타 유해 콘텐츠: true/false\n\n" +
             "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
            },
-          { inlineData: { mimeType: file.type, data: imageBase64 } }
+          { inline_data: { mime_type: file.type, data: imageBase64 } }
         ]
       }],
       generationConfig: { 
@@ -645,6 +645,7 @@ async function callGeminiAPI(apiKey, requestBody) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
       });
+
       if (!response.ok) {
         if (response.status === 429 && retryCount < maxRetries - 1) {
           retryCount++;
@@ -661,10 +662,22 @@ async function callGeminiAPI(apiKey, requestBody) {
         console.error('Gemini API 오류 응답 본문:', errText);
         return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
+
       const data = await response.json();
+
+      if (data.error) {
+        console.error('Gemini API Error:', JSON.stringify(data.error, null, 2));
+        return { success: false, error: `Gemini API 오류: ${data.error.message}` };
+      }
+
+      if (data.promptFeedback?.blockReason) {
+        console.error('콘텐츠 차단:', JSON.stringify(data.promptFeedback, null, 2));
+        return { success: false, error: `콘텐츠가 차단되었습니다: ${data.promptFeedback.blockReason}` };
+      }
+
       const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
       if (!content) {
-        // 안전한 디버깅 정보만 로그
         console.log('Gemini API 응답 상태:', {
           hasCandidates: !!data.candidates,
           candidatesLength: data.candidates?.length || 0,
@@ -677,6 +690,7 @@ async function callGeminiAPI(apiKey, requestBody) {
         console.error('전체 API 응답:', JSON.stringify(data, null, 2));
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
+
       return { success: true, text: content };
     } catch (e) {
       retryCount++;
