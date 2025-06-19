@@ -443,7 +443,13 @@ async function handleImageCensorship(file, env) {
           { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
       }],
-      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
+      generationConfig: { 
+        temperature: 0.1, 
+        topK: 40, 
+        topP: 0.95, 
+        maxOutputTokens: 256,
+        responseMimeType: "text/plain"
+      }
     };
 
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
@@ -588,7 +594,13 @@ async function handleVideoCensorship(file, env) {
           { fileData: { mimeType: file.type, fileUri: fileUri } }
         ]
       }],
-      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
+      generationConfig: { 
+        temperature: 0.1, 
+        topK: 40, 
+        topP: 0.95, 
+        maxOutputTokens: 256,
+        responseMimeType: "text/plain"
+      }
     };
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
     if (!analysis.success) {
@@ -616,6 +628,13 @@ async function callGeminiAPI(apiKey, requestBody) {
   while (retryCount < maxRetries) {
     try {
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      
+      // 요청 로그 (API 키 제외)
+      console.log('=== Gemini API 요청 구조 ===');
+      console.log('URL:', apiUrl.replace(/key=.*/, 'key=***'));
+      console.log('Body:', JSON.stringify(requestBody, null, 2));
+      console.log('=== 요청 구조 끝 ===');
+      
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
