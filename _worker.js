@@ -429,6 +429,7 @@ async function handleImageCensorship(file, env) {
 
     const requestBody = {
       contents: [{
+        role: "user",
         parts: [
           { text:
             "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -439,20 +440,15 @@ async function handleImageCensorship(file, env) {
             "5. 기타 유해 콘텐츠: true/false\n\n" +
             "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
            },
-          { inlineData: { mimeType: file.type, data: imageBase64 } }
+          { inlineData: { mimeType: file.type, data: imageBase64 } },
         ]
       }],
-      systemInstruction: {
-        parts: [{ 
-          text: "간결하고 직접적으로 답변하세요. 생각 과정을 보여주지 마세요. 요청된 형식으로만 답변하세요." 
-        }]
-      },
       generationConfig: { 
         temperature: 0.1, 
         topK: 40, 
         topP: 0.95, 
         maxOutputTokens: 256,
-        candidateCount: 1
+        responseMimeType: "text/plain"
       }
     };
 
@@ -584,6 +580,7 @@ async function handleVideoCensorship(file, env) {
     const fileUri = uploadResult.file.uri;
     const requestBody = {
       contents: [{
+        role: "user",
         parts: [
           { text:
               "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -594,20 +591,15 @@ async function handleVideoCensorship(file, env) {
               "5. 기타 유해 콘텐츠: true/false\n\n" +
               "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
              },
-          { fileData: { mimeType: file.type, fileUri: fileUri } }
+          { file_data: { mime_type: file.type, file_uri: fileUri } },
         ]
       }],
-      systemInstruction: {
-        parts: [{ 
-          text: "간결하고 직접적으로 답변하세요. 생각 과정을 보여주지 마세요. 요청된 형식으로만 답변하세요." 
-        }]
-      },
       generationConfig: { 
         temperature: 0.1, 
         topK: 40, 
         topP: 0.95, 
         maxOutputTokens: 256,
-        candidateCount: 1
+        responseMimeType: "text/plain"
       }
     };
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
@@ -635,7 +627,7 @@ async function callGeminiAPI(apiKey, requestBody) {
   const maxRetries = 3, retryDelay = 2000;
   while (retryCount < maxRetries) {
     try {
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=${apiKey}`;
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -657,46 +649,18 @@ async function callGeminiAPI(apiKey, requestBody) {
         return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
       const data = await response.json();
-      
-      // 전체 응답 구조를 로그로 출력 (디버깅용)
-      console.log('Gemini API 전체 응답:', JSON.stringify(data, null, 2));
-      
-      // 여러 가능한 응답 구조 확인
-      let content = null;
-      
-      // 1. 기본 구조: data.candidates[0].content.parts[0].text
-      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        content = data.candidates[0].content.parts[0].text;
-      }
-      // 2. 직접적인 텍스트 응답: data.text
-      else if (data.text) {
-        content = data.text;
-      }
-      // 3. 다른 가능한 구조들
-      else if (data.response?.text) {
-        content = data.response.text;
-      }
-      else if (data.choices?.[0]?.message?.content) {
-        content = data.choices[0].message.content;
-      }
-      // 4. 안전 필터링으로 인한 차단 확인
-      else if (data.candidates?.[0]?.finishReason === 'SAFETY') {
-        return { success: false, error: '안전 필터링으로 인해 응답이 차단되었습니다.' };
-      }
-      
+      const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!content) {
-        // 자세한 디버깅 정보
-        console.log('Gemini API 응답 분석:', {
+        // 안전한 디버깅 정보만 로그
+        console.log('Gemini API 응답 상태:', {
           hasCandidates: !!data.candidates,
           candidatesLength: data.candidates?.length || 0,
-          firstCandidate: data.candidates?.[0] || null,
           hasContent: !!data.candidates?.[0]?.content,
           hasParts: !!data.candidates?.[0]?.content?.parts,
           partsLength: data.candidates?.[0]?.content?.parts?.length || 0,
-          firstPart: data.candidates?.[0]?.content?.parts?.[0] || null,
           hasText: !!data.candidates?.[0]?.content?.parts?.[0]?.text,
           responseKeys: Object.keys(data || {}),
-          fullResponse: data
+          fullResponse: JSON.stringify(data, null, 2)
         });
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
