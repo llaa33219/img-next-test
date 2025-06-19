@@ -442,7 +442,18 @@ async function handleImageCensorship(file, env) {
           { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
       }],
-      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
+      systemInstruction: {
+        parts: [{ 
+          text: "간결하고 직접적으로 답변하세요. 생각 과정을 보여주지 마세요. 요청된 형식으로만 답변하세요." 
+        }]
+      },
+      generationConfig: { 
+        temperature: 0.1, 
+        topK: 40, 
+        topP: 0.95, 
+        maxOutputTokens: 256,
+        candidateCount: 1
+      }
     };
 
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
@@ -586,7 +597,18 @@ async function handleVideoCensorship(file, env) {
           { fileData: { mimeType: file.type, fileUri: fileUri } }
         ]
       }],
-      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
+      systemInstruction: {
+        parts: [{ 
+          text: "간결하고 직접적으로 답변하세요. 생각 과정을 보여주지 마세요. 요청된 형식으로만 답변하세요." 
+        }]
+      },
+      generationConfig: { 
+        temperature: 0.1, 
+        topK: 40, 
+        topP: 0.95, 
+        maxOutputTokens: 256,
+        candidateCount: 1
+      }
     };
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
     if (!analysis.success) {
@@ -635,17 +657,46 @@ async function callGeminiAPI(apiKey, requestBody) {
         return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
       const data = await response.json();
-      const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      // 전체 응답 구조를 로그로 출력 (디버깅용)
+      console.log('Gemini API 전체 응답:', JSON.stringify(data, null, 2));
+      
+      // 여러 가능한 응답 구조 확인
+      let content = null;
+      
+      // 1. 기본 구조: data.candidates[0].content.parts[0].text
+      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+        content = data.candidates[0].content.parts[0].text;
+      }
+      // 2. 직접적인 텍스트 응답: data.text
+      else if (data.text) {
+        content = data.text;
+      }
+      // 3. 다른 가능한 구조들
+      else if (data.response?.text) {
+        content = data.response.text;
+      }
+      else if (data.choices?.[0]?.message?.content) {
+        content = data.choices[0].message.content;
+      }
+      // 4. 안전 필터링으로 인한 차단 확인
+      else if (data.candidates?.[0]?.finishReason === 'SAFETY') {
+        return { success: false, error: '안전 필터링으로 인해 응답이 차단되었습니다.' };
+      }
+      
       if (!content) {
-        // 안전한 디버깅 정보만 로그
-        console.log('Gemini API 응답 상태:', {
+        // 자세한 디버깅 정보
+        console.log('Gemini API 응답 분석:', {
           hasCandidates: !!data.candidates,
           candidatesLength: data.candidates?.length || 0,
+          firstCandidate: data.candidates?.[0] || null,
           hasContent: !!data.candidates?.[0]?.content,
           hasParts: !!data.candidates?.[0]?.content?.parts,
           partsLength: data.candidates?.[0]?.content?.parts?.length || 0,
+          firstPart: data.candidates?.[0]?.content?.parts?.[0] || null,
           hasText: !!data.candidates?.[0]?.content?.parts?.[0]?.text,
-          responseKeys: Object.keys(data || {})
+          responseKeys: Object.keys(data || {}),
+          fullResponse: data
         });
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
