@@ -629,11 +629,16 @@ async function callGeminiAPI(apiKey, requestBody) {
     try {
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
       
-      // 요청 로그 (API 키 제외)
-      console.log('=== Gemini API 요청 구조 ===');
-      console.log('URL:', apiUrl.replace(/key=.*/, 'key=***'));
-      console.log('Body:', JSON.stringify(requestBody, null, 2));
-      console.log('=== 요청 구조 끝 ===');
+      // 요청 로그 (API 키 제외) - 안전하게
+      try {
+        console.log('=== Gemini API 요청 구조 ===');
+        console.log('URL:', apiUrl.replace(/key=.*/, 'key=***'));
+        console.log('Body keys:', Object.keys(requestBody));
+        console.log('Contents length:', requestBody.contents?.length || 0);
+        console.log('=== 요청 구조 끝 ===');
+      } catch (logError) {
+        console.log('로그 출력 오류:', logError.message);
+      }
       
       const response = await fetch(apiUrl, {
         method: 'POST',
@@ -657,10 +662,33 @@ async function callGeminiAPI(apiKey, requestBody) {
       }
       const data = await response.json();
       
-      // 실제 응답 구조 확인을 위한 임시 로그
-      console.log('=== Gemini API 전체 응답 구조 ===');
-      console.log(JSON.stringify(data, null, 2));
-      console.log('=== 응답 구조 확인 끝 ===');
+      // 실제 응답 구조 확인을 위한 임시 로그 - 안전하게
+      try {
+        console.log('=== Gemini API 응답 구조 ===');
+        console.log('Response keys:', Object.keys(data));
+        if (data.candidates) {
+          console.log('Candidates length:', data.candidates.length);
+          if (data.candidates[0]) {
+            console.log('First candidate keys:', Object.keys(data.candidates[0]));
+            if (data.candidates[0].content) {
+              console.log('Content keys:', Object.keys(data.candidates[0].content));
+              if (data.candidates[0].content.parts) {
+                console.log('Parts length:', data.candidates[0].content.parts.length);
+                if (data.candidates[0].content.parts[0]) {
+                  console.log('First part keys:', Object.keys(data.candidates[0].content.parts[0]));
+                  if (data.candidates[0].content.parts[0].text) {
+                    console.log('Text found:', data.candidates[0].content.parts[0].text.substring(0, 100) + '...');
+                  }
+                }
+              }
+            }
+          }
+        }
+        console.log('=== 응답 구조 확인 끝 ===');
+      } catch (logError) {
+        console.log('응답 로그 출력 오류:', logError.message);
+        console.log('Raw response:', JSON.stringify(data).substring(0, 200) + '...');
+      }
       
       // 다양한 응답 구조 시도
       let content = null;
