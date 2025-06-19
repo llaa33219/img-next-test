@@ -429,7 +429,6 @@ async function handleImageCensorship(file, env) {
 
     const requestBody = {
       contents: [{
-        role: "user",
         parts: [
           { text:
             "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -440,16 +439,10 @@ async function handleImageCensorship(file, env) {
             "5. 기타 유해 콘텐츠: true/false\n\n" +
             "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
            },
-          { inlineData: { mimeType: file.type, data: imageBase64 } },
+          { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
       }],
-      generationConfig: { 
-        temperature: 0.1, 
-        topK: 40, 
-        topP: 0.95, 
-        maxOutputTokens: 256,
-        responseMimeType: "text/plain"
-      }
+      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
     };
 
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
@@ -580,7 +573,6 @@ async function handleVideoCensorship(file, env) {
     const fileUri = uploadResult.file.uri;
     const requestBody = {
       contents: [{
-        role: "user",
         parts: [
           { text:
               "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -591,16 +583,10 @@ async function handleVideoCensorship(file, env) {
               "5. 기타 유해 콘텐츠: true/false\n\n" +
               "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
              },
-          { file_data: { mime_type: file.type, file_uri: fileUri } },
+          { file_data: { mime_type: file.type, file_uri: fileUri } }
         ]
       }],
-      generationConfig: { 
-        temperature: 0.1, 
-        topK: 40, 
-        topP: 0.95, 
-        maxOutputTokens: 256,
-        responseMimeType: "text/plain"
-      }
+      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
     };
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
     if (!analysis.success) {
@@ -659,8 +645,7 @@ async function callGeminiAPI(apiKey, requestBody) {
           hasParts: !!data.candidates?.[0]?.content?.parts,
           partsLength: data.candidates?.[0]?.content?.parts?.length || 0,
           hasText: !!data.candidates?.[0]?.content?.parts?.[0]?.text,
-          responseKeys: Object.keys(data || {}),
-          fullResponse: JSON.stringify(data, null, 2)
+          responseKeys: Object.keys(data || {})
         });
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
