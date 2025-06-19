@@ -401,22 +401,10 @@ async function handleUpload(request, env) {
 // 이미지 검열 - Gemini API 사용
 async function handleImageCensorship(file, env) {
   try {
-    console.log('[DEBUG] 이미지 검열 시작');
-    console.log('[DEBUG] 파일 정보:', {
-      name: file.name,
-      size: file.size,
-      type: file.type
-    });
-    
     const buf = await file.arrayBuffer();
     const base64 = arrayBufferToBase64(buf);
-    console.log('[DEBUG] 이미지 base64 변환 완료, 길이:', base64.length);
-    
     const geminiApiKey = env.GEMINI_API_KEY;
-    console.log('[DEBUG] API 키 확인:', !!geminiApiKey);
-    
     if (!geminiApiKey) {
-      console.log('[ERROR] Gemini API 키가 설정되지 않음');
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
@@ -424,10 +412,7 @@ async function handleImageCensorship(file, env) {
     }
 
     let imageBase64 = base64;
-    console.log('[DEBUG] 원본 이미지 크기:', buf.byteLength, 'bytes');
-    
     if (buf.byteLength > 3 * 1024 * 1024) {
-      console.log('[DEBUG] 이미지가 3MB를 초과하여 리사이징 시도');
       try {
         const dataUrl = `data:${file.type};base64,${base64}`;
         const resizedResp = await fetch(new Request(dataUrl, {
@@ -436,18 +421,14 @@ async function handleImageCensorship(file, env) {
         if (resizedResp.ok) {
           const resizedBuf = await resizedResp.blob().then(b => b.arrayBuffer());
           imageBase64 = arrayBufferToBase64(resizedBuf);
-          console.log('[DEBUG] 이미지 리사이징 성공, 새 크기:', resizedBuf.byteLength, 'bytes');
-        } else {
-          console.log('[WARNING] 이미지 리사이징 응답 실패:', resizedResp.status);
         }
       } catch (e) {
-        console.log("[WARNING] 이미지 리사이징 실패:", e);
+        console.log("이미지 리사이징 실패:", e);
       }
     }
 
     const requestBody = {
       contents: [{
-        role: "user",
         parts: [
           { text:
             "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -461,47 +442,27 @@ async function handleImageCensorship(file, env) {
           { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
       }],
-      generationConfig: { 
-        temperature: 0.1, 
-        topK: 40, 
-        topP: 0.95, 
-        maxOutputTokens: 256,
-        responseMimeType: "text/plain"
-      }
+      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
     };
 
-    console.log('[DEBUG] Gemini API 호출 시작 (이미지 검열)');
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
-    console.log('[DEBUG] Gemini API 호출 완료:', analysis.success);
-    
     if (!analysis.success) {
-      console.log('[ERROR] 이미지 검열 API 호출 실패:', analysis.error);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: `Gemini API 호출 오류: ${analysis.error}`
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
 
-    console.log('[DEBUG] API 응답 텍스트:', analysis.text);
     const bad = isInappropriateContent(analysis.text);
-    console.log('[DEBUG] 콘텐츠 검열 결과:', {
-      isInappropriate: bad.isInappropriate,
-      reasons: bad.reasons
-    });
-    
     if (bad.isInappropriate) {
-      console.log('[WARNING] 부적절한 콘텐츠 발견:', bad.reasons);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: `검열됨: ${bad.reasons.join(", ")}`
         }), { status: 400, headers: { 'Content-Type': 'application/json' } })
       };
     }
-    
-    console.log('[SUCCESS] 이미지 검열 통과');
     return { ok: true };
   } catch (e) {
-    console.log("[ERROR] handleImageCensorship 예외 발생:", e);
-    console.log("[DEBUG] 예외 스택:", e.stack);
+    console.log("handleImageCensorship error:", e);
     return { ok: false, response: new Response(JSON.stringify({
         success: false, error: `이미지 검열 중 오류 발생: ${e.message}`
       }), { status: 500, headers: { 'Content-Type': 'application/json' } })
@@ -512,19 +473,9 @@ async function handleImageCensorship(file, env) {
 // 동영상 검열 - Gemini Video 파일 업로드 API 사용
 async function handleVideoCensorship(file, env) {
   try {
-    console.log('[DEBUG] 비디오 검열 시작');
-    console.log('[DEBUG] 비디오 파일 정보:', {
-      name: file.name,
-      size: file.size,
-      type: file.type,
-      sizeMB: (file.size / (1024 * 1024)).toFixed(2)
-    });
-    
+    console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     const geminiApiKey = env.GEMINI_API_KEY;
-    console.log('[DEBUG] 비디오 검열용 API 키 확인:', !!geminiApiKey);
-    
     if (!geminiApiKey) {
-      console.log('[ERROR] 비디오 검열용 Gemini API 키가 설정되지 않음');
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
@@ -532,7 +483,6 @@ async function handleVideoCensorship(file, env) {
     }
 
     // 1) Resumable upload 시작
-    console.log('[DEBUG] 비디오 업로드 시작 - Resumable upload 요청');
     const startResp = await fetch(
       `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
       { method: 'POST',
@@ -546,29 +496,21 @@ async function handleVideoCensorship(file, env) {
         body: JSON.stringify({ file: { display_name: 'video_upload' } })
       }
     );
-    
-    console.log('[DEBUG] Resumable upload 시작 응답:', startResp.status, startResp.statusText);
     if (!startResp.ok) {
       const err = await startResp.text();
-      console.log('[ERROR] Resumable upload 시작 실패:', err);
       throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
     }
     let uploadUrl =
       startResp.headers.get('X-Goog-Upload-URL') ||
       startResp.headers.get('Location');
 
-    console.log('[DEBUG] 업로드 URL 추출 시도:', !!uploadUrl);
-    console.log('[DEBUG] 응답 헤더:', Object.fromEntries([...startResp.headers]));
-
     if (!uploadUrl) {
-      console.log('[DEBUG] 헤더에서 업로드 URL을 찾지 못함, 응답 본문 확인');
       // Response 본문을 두 번 읽으려면 clone() 사용
       const cloneForJson = startResp.clone();
       const cloneForText = startResp.clone();
 
       // JSON 바디에서 가능한 필드 확인
       const json = await cloneForJson.json().catch(() => null);
-      console.log('[DEBUG] 응답 JSON:', json);
       uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
 
       if (!uploadUrl) {
@@ -576,16 +518,11 @@ async function handleVideoCensorship(file, env) {
           .map(([k, v]) => `${k}: ${v}`)
           .join('\n');
         const textBody = await cloneForText.text().catch(() => '');
-        console.log('[ERROR] 업로드 URL을 찾을 수 없음');
-        console.log('[DEBUG] 응답 헤더 전체:', hdrs);
-        console.log('[DEBUG] 응답 본문:', textBody);
         throw new Error(
           `Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디:\n${textBody}`
         );
       }
     }
-    
-    console.log('[DEBUG] 업로드 URL 확인 완료:', uploadUrl ? 'URL 존재' : 'URL 없음');
 
     // 2) 파일 업로드 및 finalize
     const buffer = await file.arrayBuffer();
@@ -636,7 +573,6 @@ async function handleVideoCensorship(file, env) {
     const fileUri = uploadResult.file.uri;
     const requestBody = {
       contents: [{
-        role: "user",
         parts: [
           { text:
               "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -647,45 +583,24 @@ async function handleVideoCensorship(file, env) {
               "5. 기타 유해 콘텐츠: true/false\n\n" +
               "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
              },
-          { file_data: { mime_type: file.type, file_uri: fileUri } }
+          { fileData: { mimeType: file.type, fileUri: fileUri } }
         ]
       }],
-      generationConfig: { 
-        temperature: 0.1, 
-        topK: 40, 
-        topP: 0.95, 
-        maxOutputTokens: 256,
-        responseMimeType: "text/plain"
-      }
+      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
     };
-    console.log('[DEBUG] 비디오 검열 API 호출 시작');
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
-    console.log('[DEBUG] 비디오 검열 API 호출 완료:', analysis.success);
-    
     if (!analysis.success) {
-      console.log('[ERROR] 비디오 검열 API 호출 실패:', analysis.error);
       throw new Error(analysis.error);
     }
-    
-    console.log('[DEBUG] 비디오 검열 API 응답 텍스트:', analysis.text);
     const bad = isInappropriateContent(analysis.text);
-    console.log('[DEBUG] 비디오 콘텐츠 검열 결과:', {
-      isInappropriate: bad.isInappropriate,
-      reasons: bad.reasons
-    });
-    
     if (bad.isInappropriate) {
-      console.log('[WARNING] 부적절한 비디오 콘텐츠 발견:', bad.reasons);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: `검열됨: ${bad.reasons.join(', ')}`
         }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
     }
-    
-    console.log('[SUCCESS] 비디오 검열 통과');
     return { ok: true };
   } catch (e) {
-    console.log('[ERROR] handleVideoCensorship 예외 발생:', e);
-    console.log('[DEBUG] 예외 스택:', e.stack);
+    console.log('handleVideoCensorship 오류:', e);
     return { ok: false, response: new Response(JSON.stringify({
         success: false, error: `동영상 검열 중 오류 발생: ${e.message}`
       }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
@@ -696,83 +611,48 @@ async function handleVideoCensorship(file, env) {
 async function callGeminiAPI(apiKey, requestBody) {
   let retryCount = 0;
   const maxRetries = 3, retryDelay = 2000;
-  
-  console.log('[DEBUG] Gemini API 호출 시작');
-  console.log('[DEBUG] API Key 존재 여부:', !!apiKey);
-  console.log('[DEBUG] API Key 길이:', apiKey ? apiKey.length : 0);
-  console.log('[DEBUG] 요청 본문 구조:', {
-    hasContents: !!requestBody.contents,
-    contentsLength: requestBody.contents?.length || 0,
-    hasGenerationConfig: !!requestBody.generationConfig,
-    generationConfigKeys: requestBody.generationConfig ? Object.keys(requestBody.generationConfig) : []
-  });
-  
   while (retryCount < maxRetries) {
     try {
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-      console.log('[DEBUG] API URL:', apiUrl.replace(apiKey, 'API_KEY_HIDDEN'));
-      
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
       });
-      
-      console.log('[DEBUG] 응답 상태:', response.status, response.statusText);
-      console.log('[DEBUG] 응답 헤더:', Object.fromEntries([...response.headers]));
-      
       if (!response.ok) {
-        const errText = await response.text();
-        console.log('[DEBUG] 오류 응답 본문:', errText);
-        
         if (response.status === 429 && retryCount < maxRetries - 1) {
           retryCount++;
-          console.log(`[DEBUG] 할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
+          console.log(`할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
           await new Promise(r => setTimeout(r, retryDelay));
           continue;
         }
-        
-        console.log('[ERROR] Gemini API 호출 실패:', {
+        console.log('Gemini API 호출 실패:', {
           status: response.status,
           statusText: response.statusText,
-          errorBody: errText
+          headers: Object.fromEntries([...response.headers])
         });
-        return { success: false, error: `API 오류 (${response.status}): ${response.statusText} - ${errText}` };
+        const errText = await response.text();
+        return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
-      
       const data = await response.json();
-      console.log('[DEBUG] 성공 응답 전체 구조:', JSON.stringify(data, null, 2));
-      
       const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      console.log('[DEBUG] 추출된 텍스트 콘텐츠:', content);
-      
       if (!content) {
-        console.log('[ERROR] 텍스트 콘텐츠 추출 실패');
-        console.log('[DEBUG] 상세 응답 구조 분석:', {
+        // 안전한 디버깅 정보만 로그
+        console.log('Gemini API 응답 상태:', {
           hasCandidates: !!data.candidates,
           candidatesLength: data.candidates?.length || 0,
-          candidates: data.candidates,
-          firstCandidate: data.candidates?.[0],
           hasContent: !!data.candidates?.[0]?.content,
-          content: data.candidates?.[0]?.content,
           hasParts: !!data.candidates?.[0]?.content?.parts,
-          parts: data.candidates?.[0]?.content?.parts,
           partsLength: data.candidates?.[0]?.content?.parts?.length || 0,
           hasText: !!data.candidates?.[0]?.content?.parts?.[0]?.text,
-          responseKeys: Object.keys(data || {}),
-          fullResponse: data
+          responseKeys: Object.keys(data || {})
         });
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
-      
-      console.log('[SUCCESS] Gemini API 호출 성공, 텍스트 길이:', content.length);
       return { success: true, text: content };
-      
     } catch (e) {
       retryCount++;
-      console.log(`[ERROR] API 호출 예외 발생, 재시도 ${retryCount}/${maxRetries}:`, e);
-      console.log('[DEBUG] 예외 스택:', e.stack);
-      
+      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
       if (retryCount < maxRetries) {
         await new Promise(r => setTimeout(r, retryDelay));
       } else {
@@ -780,8 +660,6 @@ async function callGeminiAPI(apiKey, requestBody) {
       }
     }
   }
-  
-  console.log('[ERROR] 최대 재시도 횟수 초과');
   return { success: false, error: '최대 재시도 횟수 초과' };
 }
 
