@@ -429,7 +429,6 @@ async function handleImageCensorship(file, env) {
 
     const requestBody = {
       contents: [{
-        role: "user",
         parts: [
           { text:
             "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -440,22 +439,10 @@ async function handleImageCensorship(file, env) {
             "5. 기타 유해 콘텐츠: true/false\n\n" +
             "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
            },
-          { inline_data: { mime_type: file.type, data: imageBase64 } }
+          { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
       }],
-      generationConfig: { 
-        temperature: 0.1, 
-        topK: 40, 
-        topP: 0.95, 
-        maxOutputTokens: 256,
-        responseMimeType: 'text/plain'
-      },
-      safetySettings: [
-        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-      ]
+      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
     };
 
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
@@ -586,7 +573,6 @@ async function handleVideoCensorship(file, env) {
     const fileUri = uploadResult.file.uri;
     const requestBody = {
       contents: [{
-        role: "user",
         parts: [
           { text:
               "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -597,22 +583,10 @@ async function handleVideoCensorship(file, env) {
               "5. 기타 유해 콘텐츠: true/false\n\n" +
               "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
              },
-          { file_data: { mime_type: file.type, file_uri: fileUri } }
+          { fileData: { mimeType: file.type, fileUri: fileUri } }
         ]
       }],
-      generationConfig: { 
-        temperature: 0.1, 
-        topK: 40, 
-        topP: 0.95, 
-        maxOutputTokens: 256,
-        responseMimeType: 'text/plain'
-      },
-      safetySettings: [
-        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-      ]
+      generationConfig: { temperature: 0.1, topK: 40, topP: 0.95, maxOutputTokens: 256 }
     };
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
     if (!analysis.success) {
@@ -645,7 +619,6 @@ async function callGeminiAPI(apiKey, requestBody) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
       });
-
       if (!response.ok) {
         if (response.status === 429 && retryCount < maxRetries - 1) {
           retryCount++;
@@ -659,25 +632,51 @@ async function callGeminiAPI(apiKey, requestBody) {
           headers: Object.fromEntries([...response.headers])
         });
         const errText = await response.text();
-        console.error('Gemini API 오류 응답 본문:', errText);
         return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
-
       const data = await response.json();
-
-      if (data.error) {
-        console.error('Gemini API Error:', JSON.stringify(data.error, null, 2));
-        return { success: false, error: `Gemini API 오류: ${data.error.message}` };
+      
+      // 디버깅을 위한 응답 구조 확인 (간단하게)
+      if (!data.candidates || data.candidates.length === 0) {
+        console.log('Gemini API 응답에 candidates가 없습니다:', Object.keys(data));
       }
-
-      if (data.promptFeedback?.blockReason) {
-        console.error('콘텐츠 차단:', JSON.stringify(data.promptFeedback, null, 2));
-        return { success: false, error: `콘텐츠가 차단되었습니다: ${data.promptFeedback.blockReason}` };
+      
+      // 다양한 응답 구조 시도
+      let content = null;
+      
+      // 기존 구조 시도
+      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+        content = data.candidates[0].content.parts[0].text;
       }
-
-      const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
-
+      // 새로운 구조 시도 1: text 필드가 직접 있는 경우
+      else if (data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data) {
+        content = data.candidates[0].content.parts[0].inlineData.data;
+      }
+      // 새로운 구조 시도 2: response 필드가 있는 경우
+      else if (data.response?.text) {
+        content = data.response.text;
+      }
+      // 새로운 구조 시도 3: text 필드가 최상위에 있는 경우
+      else if (data.text) {
+        content = data.text;
+      }
+      // 새로운 구조 시도 4: candidates[0].text가 직접 있는 경우
+      else if (data.candidates?.[0]?.text) {
+        content = data.candidates[0].text;
+      }
+      // 새로운 구조 시도 5: parts에서 text만 추출
+      else if (data.candidates?.[0]?.content?.parts) {
+        const parts = data.candidates[0].content.parts;
+        for (const part of parts) {
+          if (part.text) {
+            content = part.text;
+            break;
+          }
+        }
+      }
+      
       if (!content) {
+        // 안전한 디버깅 정보만 로그
         console.log('Gemini API 응답 상태:', {
           hasCandidates: !!data.candidates,
           candidatesLength: data.candidates?.length || 0,
@@ -685,12 +684,11 @@ async function callGeminiAPI(apiKey, requestBody) {
           hasParts: !!data.candidates?.[0]?.content?.parts,
           partsLength: data.candidates?.[0]?.content?.parts?.length || 0,
           hasText: !!data.candidates?.[0]?.content?.parts?.[0]?.text,
-          responseKeys: Object.keys(data || {})
+          responseKeys: Object.keys(data || {}),
+          fullResponse: JSON.stringify(data).substring(0, 500) + '...'
         });
-        console.error('전체 API 응답:', JSON.stringify(data, null, 2));
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
-
       return { success: true, text: content };
     } catch (e) {
       retryCount++;
