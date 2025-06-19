@@ -429,6 +429,7 @@ async function handleImageCensorship(file, env) {
 
     const requestBody = {
       contents: [{
+        role: 'user',
         parts: [
           { text:
             "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -573,6 +574,7 @@ async function handleVideoCensorship(file, env) {
     const fileUri = uploadResult.file.uri;
     const requestBody = {
       contents: [{
+        role: 'user',
         parts: [
           { text:
               "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
@@ -636,10 +638,10 @@ async function callGeminiAPI(apiKey, requestBody) {
       }
       const data = await response.json();
       
-      // 디버깅을 위한 응답 구조 확인 (간단하게)
-      if (!data.candidates || data.candidates.length === 0) {
-        console.log('Gemini API 응답에 candidates가 없습니다:', Object.keys(data));
-      }
+      // 실제 응답 구조 확인을 위한 임시 로그
+      console.log('=== Gemini API 전체 응답 구조 ===');
+      console.log(JSON.stringify(data, null, 2));
+      console.log('=== 응답 구조 확인 끝 ===');
       
       // 다양한 응답 구조 시도
       let content = null;
