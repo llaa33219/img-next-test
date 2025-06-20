@@ -1040,17 +1040,27 @@ function renderHTML(mediaTags, host) {
       align-items: center;
     }
 
-    .modal-image {
-      max-width: 90%;
-      max-height: 90%;
-      transform-origin: center;
-      transition: transform 0.3s ease;
-      cursor: grab;
-    }
+         .modal-image {
+       max-width: 90%;
+       max-height: 90%;
+       transform-origin: center;
+       transition: transform 0.3s ease;
+       cursor: grab;
+       touch-action: manipulation; /* 모바일 더블탭 확대 방지 */
+       user-select: none; /* 텍스트 선택 방지 */
+       -webkit-user-select: none;
+       -moz-user-select: none;
+       -ms-user-select: none;
+     }
 
-    .modal-image:active {
-      cursor: grabbing;
-    }
+     .modal-image:active {
+       cursor: grabbing;
+     }
+
+     .modal-image.dragging {
+       transition: none; /* 드래그 중 애니메이션 제거 */
+       cursor: grabbing;
+     }
 
     /* 컨트롤 패널 */
     .modal-controls {
@@ -1261,13 +1271,21 @@ function renderHTML(mediaTags, host) {
         this.rotateRightBtn.addEventListener('click', () => this.rotateRight());
         this.resetBtn.addEventListener('click', () => this.resetView());
         
-                 // 드래그 이벤트
+                 // 마우스 드래그 이벤트
          this.modalImage.addEventListener('mousedown', (e) => this.startDrag(e));
          document.addEventListener('mousemove', (e) => this.drag(e));
          document.addEventListener('mouseup', () => this.endDrag());
          
-         // 브라우저 기본 드래그 방지
+         // 터치 드래그 이벤트 (모바일)
+         this.modalImage.addEventListener('touchstart', (e) => this.startTouch(e));
+         document.addEventListener('touchmove', (e) => this.touchMove(e));
+         document.addEventListener('touchend', () => this.endDrag());
+         
+         // 브라우저 기본 드래그 및 더블탭 확대 방지
          this.modalImage.addEventListener('dragstart', (e) => e.preventDefault());
+         this.modalImage.addEventListener('gesturestart', (e) => e.preventDefault());
+         this.modalImage.addEventListener('gesturechange', (e) => e.preventDefault());
+         this.modalImage.addEventListener('gestureend', (e) => e.preventDefault());
         
         // 마우스 휠로 확대/축소
         this.modalImage.addEventListener('wheel', (e) => this.handleWheel(e));
@@ -1336,26 +1354,51 @@ function renderHTML(mediaTags, host) {
         this.updateTransform();
       }
       
-      startDrag(e) {
-        if (this.scale > 1) {
-          this.isDragging = true;
-          this.startX = e.clientX - this.posX;
-          this.startY = e.clientY - this.posY;
-          e.preventDefault();
-        }
-      }
-      
-      drag(e) {
-        if (this.isDragging) {
-          this.posX = e.clientX - this.startX;
-          this.posY = e.clientY - this.startY;
-          this.updateTransform();
-        }
-      }
-      
-      endDrag() {
-        this.isDragging = false;
-      }
+             startDrag(e) {
+         if (this.scale > 1) {
+           this.isDragging = true;
+           this.startX = e.clientX - this.posX;
+           this.startY = e.clientY - this.posY;
+           this.modalImage.classList.add('dragging');
+           e.preventDefault();
+         }
+       }
+       
+       startTouch(e) {
+         if (this.scale > 1 && e.touches.length === 1) {
+           this.isDragging = true;
+           const touch = e.touches[0];
+           this.startX = touch.clientX - this.posX;
+           this.startY = touch.clientY - this.posY;
+           this.modalImage.classList.add('dragging');
+           e.preventDefault();
+         }
+       }
+       
+       drag(e) {
+         if (this.isDragging) {
+           this.posX = e.clientX - this.startX;
+           this.posY = e.clientY - this.startY;
+           this.updateTransform();
+         }
+       }
+       
+       touchMove(e) {
+         if (this.isDragging && e.touches.length === 1) {
+           const touch = e.touches[0];
+           this.posX = touch.clientX - this.startX;
+           this.posY = touch.clientY - this.startY;
+           this.updateTransform();
+           e.preventDefault();
+         }
+       }
+       
+       endDrag() {
+         if (this.isDragging) {
+           this.isDragging = false;
+           this.modalImage.classList.remove('dragging');
+         }
+       }
       
       handleWheel(e) {
         e.preventDefault();
