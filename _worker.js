@@ -341,12 +341,23 @@ async function handleUpload(request, env) {
 
   // 1) 검열
   try {
-    for (const file of files) {
+    console.log(`[검열 시작] ${files.length}개 파일 검열 시작`);
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.type}, ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+      
       const r = file.type.startsWith('image/')
         ? await handleImageCensorship(file, env)
         : await handleVideoCensorship(file, env);
-      if (!r.ok) return r.response;
+        
+      if (!r.ok) {
+        console.log(`[검열 실패] ${i + 1}번째 파일에서 검열 실패`);
+        return r.response;
+      } else {
+        console.log(`[검열 통과] ${i + 1}번째 파일 검열 통과`);
+      }
     }
+    console.log(`[검열 완료] 모든 파일(${files.length}개) 검열 통과`);
   } catch (e) {
     console.log("검열 과정에서 예상치 못한 오류 발생:", e);
     return new Response(JSON.stringify({
@@ -431,33 +442,35 @@ async function handleImageCensorship(file, env) {
       contents: [{
         parts: [
           { text:
-            "Analyze this image for inappropriate content across multiple categories. Be thorough but avoid false positives for legitimate content. " +
-            "Pay special attention to text (including partially obscured, noisy, or stylized text), attempts to bypass detection, and context. " +
-            "Answer only true/false for each category:\n\n" +
-            "1. Sexual/NSFW content (explicit nudity, sexual acts, suggestive poses): true/false\n" +
-            "2. Violence/weapons (graphic violence, weapons, blood, gore): true/false\n" +
-            "3. Drugs/substances (illegal drugs, drug paraphernalia, excessive alcohol): true/false\n" +
-            "4. Hate speech/offensive content (hate symbols, discriminatory content, offensive gestures): true/false\n" +
-            "5. Illegal activities (criminal acts, fraud, illegal sales): true/false\n" +
-            "6. Self-harm content (cutting, suicide imagery, dangerous challenges): true/false\n" +
-            "7. Minor safety (content harmful to children, inappropriate for minors): true/false\n" +
-            "8. Offensive text (profanity, slurs, threats - including partially hidden, stylized, or noisy text): true/false\n" +
-            "9. Detection bypass attempts (deliberate noise, partial covering, obfuscation to hide violations): true/false\n" +
-            "10. Spam/scam content (phishing attempts, fake promotions, misleading claims): true/false\n\n" +
-            "Consider context and intent. Artistic, educational, medical, or news content should generally not be flagged unless extremely graphic. " +
-            "Answer each line with only the number and true/false. Do not provide explanations."
+            "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+            "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
+            "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+            "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+            "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+            "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+            "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+            "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+            "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
+            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+            "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
            },
           { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
       }],
       generationConfig: { 
-        temperature: 0.05,  // 더 일관적인 응답을 위해 낮춤
-        topK: 20,           // 더 정확한 토큰 선택을 위해 줄임
-        topP: 0.8,          // 더 정확한 응답을 위해 줄임
-        maxOutputTokens: 512,
-        candidateCount: 1,
+        temperature: 0.05, 
+        topK: 20, 
+        topP: 0.8, 
+        maxOutputTokens: 400,
         thinkingConfig: {
-          thinkingBudget: 0
+          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
         }
       }
     };
@@ -471,9 +484,42 @@ async function handleImageCensorship(file, env) {
     }
 
     const bad = isInappropriateContent(analysis.text);
+    
+    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
+    if (bad.isInappropriate && bad.reasons.length >= 4) {
+      console.log(`[과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
+      
+      // 보수적 재검토 요청
+      const reReviewBody = {
+        contents: [{
+          parts: [
+            { text:
+              "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+              "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
+              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+             },
+            { inlineData: { mimeType: file.type, data: imageBase64 } }
+          ]
+        }],
+        generationConfig: { 
+          temperature: 0.0, 
+          topK: 10, 
+          topP: 0.7, 
+          maxOutputTokens: 50
+        }
+      };
+      
+      const reReview = await callGeminiAPI(geminiApiKey, reReviewBody);
+      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
+        console.log(`[재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
+        return { ok: true };
+      }
+    }
+    
     if (bad.isInappropriate) {
+      console.log(`[검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: `검열됨: ${bad.reasons.join(", ")}`
+          success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`
         }), { status: 400, headers: { 'Content-Type': 'application/json' } })
       };
     }
@@ -592,33 +638,36 @@ async function handleVideoCensorship(file, env) {
       contents: [{
         parts: [
           { text:
-              "Analyze this video for inappropriate content across multiple categories. Be thorough but avoid false positives for legitimate content. " +
-              "Pay special attention to audio content, text overlays (including partially obscured, noisy, or stylized text), attempts to bypass detection, and context throughout the video. " +
-              "Answer only true/false for each category:\n\n" +
-              "1. Sexual/NSFW content (explicit nudity, sexual acts, suggestive poses): true/false\n" +
-              "2. Violence/weapons (graphic violence, weapons, blood, gore): true/false\n" +
-              "3. Drugs/substances (illegal drugs, drug paraphernalia, excessive alcohol): true/false\n" +
-              "4. Hate speech/offensive content (hate symbols, discriminatory content, offensive gestures, audio slurs): true/false\n" +
-              "5. Illegal activities (criminal acts, fraud, illegal sales): true/false\n" +
-              "6. Self-harm content (cutting, suicide imagery, dangerous challenges): true/false\n" +
-              "7. Minor safety (content harmful to children, inappropriate for minors): true/false\n" +
-              "8. Offensive text/audio (profanity, slurs, threats - including partially hidden, stylized, or noisy text/audio): true/false\n" +
-              "9. Detection bypass attempts (deliberate noise, partial covering, obfuscation to hide violations): true/false\n" +
-              "10. Spam/scam content (phishing attempts, fake promotions, misleading claims): true/false\n\n" +
-              "Consider context and intent. Artistic, educational, medical, or news content should generally not be flagged unless extremely graphic. " +
-              "Answer each line with only the number and true/false. Do not provide explanations."
+              "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
+              "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
+              "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+              "Consider the entire video duration and any content that appears briefly. " +
+              "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+              "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+              "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+              "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+              "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+              "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+              "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
+              "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+              "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+              "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+              "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+              "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+              "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+              "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+              "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
              },
           { file_data: { mime_type: file.type, file_uri: fileUri } }
         ]
       }],
       generationConfig: { 
-        temperature: 0.1,  // 더 일관적인 응답을 위해 낮춤
-        topK: 20,           // 더 정확한 토큰 선택을 위해 줄임
-        topP: 0.8,          // 더 정확한 응답을 위해 줄임
-        maxOutputTokens: 512,
-        candidateCount: 1,
+        temperature: 0.05, 
+        topK: 20, 
+        topP: 0.8, 
+        maxOutputTokens: 400,
         thinkingConfig: {
-          thinkingBudget: 0
+          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
         }
       }
     };
@@ -627,9 +676,42 @@ async function handleVideoCensorship(file, env) {
       throw new Error(analysis.error);
     }
     const bad = isInappropriateContent(analysis.text);
+    
+    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
+    if (bad.isInappropriate && bad.reasons.length >= 4) {
+      console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
+      
+      // 보수적 재검토 요청
+      const reReviewBody = {
+        contents: [{
+          parts: [
+            { text:
+              "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+              "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
+              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+             },
+            { file_data: { mime_type: file.type, file_uri: fileUri } }
+          ]
+        }],
+        generationConfig: { 
+          temperature: 0.0, 
+          topK: 10, 
+          topP: 0.7, 
+          maxOutputTokens: 50
+        }
+      };
+      
+      const reReview = await callGeminiAPI(geminiApiKey, reReviewBody);
+      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
+        console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
+        return { ok: true };
+      }
+    }
+    
     if (bad.isInappropriate) {
+      console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: `검열됨: ${bad.reasons.join(', ')}`
+          success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
         }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
     }
     return { ok: true };
@@ -647,7 +729,7 @@ async function callGeminiAPI(apiKey, requestBody) {
   const maxRetries = 3, retryDelay = 2000;
   while (retryCount < maxRetries) {
     try {
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`;
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -719,52 +801,53 @@ async function callGeminiAPI(apiKey, requestBody) {
 }
 
 // =======================
-// 부적절한 내용 분석 함수 (강화된 10개 카테고리 버전)
+// 부적절한 내용 분석 함수 (강화된 버전)
 // =======================
 function isInappropriateContent(responseText) {
-  // 카테고리 인덱스 → 사용자 표시용 이름 매핑
+  // 카테고리 인덱스 → 사용자 표시용 이름 매핑 (한국어)
   const categoryMap = {
-    1: '선정적/성인 콘텐츠',
-    2: '폭력/무기 콘텐츠',
-    3: '약물/물질 남용 콘텐츠',
-    4: '혐오/차별 표현',
-    5: '불법 활동 콘텐츠',
-    6: '자해/위험 콘텐츠',
-    7: '미성년자 유해 콘텐츠',
-    8: '욕설/모독적 텍스트/음성',
-    9: '검열 우회 시도',
-    10: '스팸/사기 콘텐츠'
+    1: '성적/노출 콘텐츠',
+    2: '부분적 노출/선정적 콘텐츠',
+    3: '폭력/무기 콘텐츠',
+    4: '극단적 폭력/고어 콘텐츠',
+    5: '약물/알코올 남용 콘텐츠',
+    6: '혐오 발언/욕설',
+    7: '괴롭힘/따돌림 콘텐츠',
+    8: '자해/자살 관련 콘텐츠',
+    9: '불법 활동',
+    10: '스팸/사기 콘텐츠',
+    11: '아동 착취',
+    12: '극단주의 콘텐츠'
   };
 
   // 결과 저장소
   const flagged = [];
 
   // 응답을 줄별로 순회하며 다양한 패턴 파싱
-  const lines = responseText.split(/\r?\n/);
-  lines.forEach((line, lineIndex) => {
+  responseText.split(/\r?\n/).forEach((line, lineIndex) => {
     // 패턴 1: "숫자. true/false" 형태
-    let m = line.match(/^\s*([1-9]|10)\.\s*(true|false)\b/i);
+    let m = line.match(/^\s*([1-9]|1[0-2])\.\s*(true|false)\b/i);
     if (!m) {
       // 패턴 2: "숫자: true/false" 형태
-      m = line.match(/^\s*([1-9]|10):\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|1[0-2]):\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 3: "숫자 - true/false" 형태
-      m = line.match(/^\s*([1-9]|10)\s*[-–]\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|1[0-2])\s*[-–]\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 4: "숫자) true/false" 형태
-      m = line.match(/^\s*([1-9]|10)\)\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|1[0-2])\)\s*(true|false)\b/i);
     }
     if (!m) {
-      // 패턴 5: 단순히 "true" 또는 "false"만 있는 경우 (순서대로 1-10 매핑)
+      // 패턴 5: 단순히 "true" 또는 "false"만 있는 경우 (순서대로 1-12 매핑)
       const trueMatch = line.match(/^\s*(true|false)\b/i);
-      if (trueMatch && lineIndex < 10) {
-        // 빈 줄을 건너뛰고 실제 답변 줄만 카운트
-        const nonEmptyIndex = lines.slice(0, lineIndex + 1)
-          .filter(l => l.trim() && l.match(/^\s*(true|false)\b/i)).length;
-        if (nonEmptyIndex >= 1 && nonEmptyIndex <= 10) {
-          m = [null, nonEmptyIndex.toString(), trueMatch[1]];
+      if (trueMatch) {
+        // 실제 내용이 있는 줄들만 카운트
+        const contentLines = responseText.split(/\r?\n/).filter(l => l.trim().match(/^\s*(true|false)\b/i));
+        const contentLineIndex = contentLines.indexOf(line.trim());
+        if (contentLineIndex >= 0 && contentLineIndex < 12) {
+          m = [null, (contentLineIndex + 1).toString(), trueMatch[1]];
         }
       }
     }
