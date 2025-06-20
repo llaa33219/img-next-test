@@ -270,9 +270,9 @@ export default {
         let mediaTags = "";
         for (const { code, object } of objects) {
           if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTags += `<div class="player-container"><video controls preload="metadata" src="https://${url.host}/${code}?raw=1"></video></div>\n`;
+            mediaTags += `<video src="https://${url.host}/${code}?raw=1"></video>\n`;
           } else {
-            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media" onclick="openImageViewer(this.src)">\n`;
+            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
           }
         }
         return new Response(renderHTML(mediaTags, url.host), {
@@ -285,51 +285,13 @@ export default {
         if (url.searchParams.get('raw') === '1') {
           const headers = new Headers();
           headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
-          
-          // 영상 파일에 대한 Range 요청 처리
-          if (object.httpMetadata?.contentType?.startsWith('video/')) {
-            const rangeHeader = request.headers.get('Range');
-            if (rangeHeader) {
-              // Range 요청 처리
-              const fileSize = object.size;
-              const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-              
-              if (match) {
-                const start = parseInt(match[1]);
-                const end = match[2] ? parseInt(match[2]) : fileSize - 1;
-                
-                if (start >= fileSize || end >= fileSize || start > end) {
-                  return new Response('Range Not Satisfiable', { status: 416 });
-                }
-                
-                // 부분 스트림으로 응답
-                const contentLength = end - start + 1;
-                headers.set('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-                headers.set('Content-Length', contentLength.toString());
-                headers.set('Accept-Ranges', 'bytes');
-                
-                // R2에서 부분 데이터 읽기
-                const stream = object.body.slice(start, end + 1);
-                
-                return new Response(stream, {
-                  status: 206,
-                  headers
-                });
-              }
-            }
-            
-            // Range 요청이 없는 경우 Accept-Ranges 헤더 추가
-            headers.set('Accept-Ranges', 'bytes');
-            headers.set('Content-Length', object.size.toString());
-          }
-          
           return new Response(object.body, { headers });
         } else {
           let mediaTag = "";
           if (object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTag = `<div class="player-container"><video controls preload="metadata" src="https://${url.host}/${key}?raw=1"></video></div>\n`;
+            mediaTag = `<video src="https://${url.host}/${key}?raw=1"></video>\n`;
           } else {
-            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media" onclick="openImageViewer(this.src)">\n`;
+            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
           }
           return new Response(renderHTML(mediaTag, url.host), {
             headers: { 'Content-Type': 'text/html; charset=UTF-8' }
@@ -657,46 +619,17 @@ async function handleVideoCensorship(file, env) {
       throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
     }
     let myfile = await statusResp.json();
-    let processingAttempts = 0;
-    const maxProcessingAttempts = 24; // 최대 2분 대기 (5초 * 24)
-    
-    while (myfile.state === 'PROCESSING' && processingAttempts < maxProcessingAttempts) {
-      console.log(`비디오 처리 중... (${processingAttempts + 1}/${maxProcessingAttempts})`);
+    while (myfile.state === 'PROCESSING') {
+      console.log('비디오 처리 중...');
       await new Promise(r => setTimeout(r, 5000));
-      processingAttempts++;
-      
-      try {
-        statusResp = await fetch(statusUrl);
-        if (!statusResp.ok) {
-          console.log(`상태 조회 실패 (시도 ${processingAttempts}): ${statusResp.status}`);
-          if (processingAttempts >= maxProcessingAttempts - 2) {
-            // 마지막 몇 번의 시도에서도 실패하면 에러 처리
-            throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
-          }
-          continue;
-        }
-        myfile = await statusResp.json();
-      } catch (error) {
-        console.log(`상태 조회 중 오류 (시도 ${processingAttempts}):`, error.message);
-        if (processingAttempts >= maxProcessingAttempts - 2) {
-          throw error;
-        }
-        continue;
+      statusResp = await fetch(statusUrl);
+      if (!statusResp.ok) {
+        throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
       }
+      myfile = await statusResp.json();
     }
-    
-    if (myfile.state === 'PROCESSING') {
-      console.log('비디오 처리 시간 초과');
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: '비디오 처리 시간이 초과되었습니다. 다시 시도해주세요.'
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
-    }
-    
     if (myfile.state !== 'ACTIVE') {
-      console.log(`비디오 파일 상태: ${myfile.state}, 검열 불가능`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: `비디오 파일 처리 실패: ${myfile.state}. 다시 시도해주세요.`
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
+      throw new Error(`비디오 파일이 활성 상태가 아닙니다: ${myfile.state}`);
     }
 
     // 5) 검열 요청
@@ -738,23 +671,10 @@ async function handleVideoCensorship(file, env) {
         }
       }
     };
-    
-    let analysis;
-    try {
-      analysis = await callGeminiAPI(geminiApiKey, requestBody);
-      if (!analysis.success) {
-        console.log(`비디오 검열 API 실패: ${analysis.error}`);
-        return { ok: false, response: new Response(JSON.stringify({
-            success: false, error: `비디오 검열 실패: ${analysis.error}`
-          }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
-      }
-    } catch (error) {
-      console.log(`비디오 검열 중 오류: ${error.message}`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: `비디오 검열 중 오류가 발생했습니다: ${error.message}`
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
+    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
+    if (!analysis.success) {
+      throw new Error(analysis.error);
     }
-    
     const bad = isInappropriateContent(analysis.text);
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
@@ -948,7 +868,23 @@ function isInappropriateContent(responseText) {
 }
 
 // MP4 재생길이 간단 추출 함수
-
+async function getMP4Duration(file) {
+  try {
+    const buffer = await file.arrayBuffer(), dv = new DataView(buffer), u = new Uint8Array(buffer);
+    for (let i=0; i<u.length-4; i++) {
+      if (u[i]===109 && u[i+1]===118 && u[i+2]===104 && u[i+3]===100) {
+        const vs = dv.getUint8(i-4+8);
+        const ts = vs===0 ? dv.getUint32(i-4+20) : dv.getUint32(i-4+28);
+        const du = vs===0 ? dv.getUint32(i-4+24) : (dv.getUint32(i-4+32)*2**32 + dv.getUint32(i-4+36));
+        return du/ts;
+      }
+    }
+    return null;
+  } catch (e) {
+    console.log("getMP4Duration error:", e);
+    return null;
+  }
+}
 
 // 고유 8자 코드 생성
 async function generateUniqueCode(env, length=8) {
@@ -1208,264 +1144,22 @@ function renderHTML(mediaTags, host) {
       <button id="downloadImage">다운로드</button>
       <button id="downloadImagepng">png로 다운로드</button>
   </div>
-  
-  <!-- 이미지 뷰어 모달 -->
-  <div class="image-viewer-modal" id="imageViewerModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.95); z-index: 10000; display: none; justify-content: center; align-items: center; flex-direction: column;">
-    <div style="position: relative; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; overflow: hidden;">
-             <img id="imageViewerImg" src="" alt="확대된 이미지" draggable="false" style="max-width: 90%; max-height: 90%; object-fit: contain; cursor: grab; user-select: none; -webkit-user-drag: none; -khtml-user-drag: none; -moz-user-drag: none; -o-user-drag: none; pointer-events: auto;">
-      <button id="imageViewerClose" style="position: absolute; top: 30px; right: 30px; background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 24px; margin: 0; box-shadow: none; font-weight: normal;">×</button>
-      <div style="position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 15px; background-color: rgba(0, 0, 0, 0.7); padding: 15px; border-radius: 30px;">
-        <button id="zoomOut" title="축소" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">-</button>
-        <button id="zoomIn" title="확대" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">+</button>
-        <button id="rotateLeft" title="왼쪽 회전" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">↻</button>
-        <button id="rotateRight" title="오른쪽 회전" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">↺</button>
-        <button id="resetView" title="원래 크기" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">⌂</button>
-      </div>
-    </div>
-  </div>
   <script>
-    // 이미지 뷰어 모달 JavaScript 포함
-    class ImageViewer {
-             constructor() {
-         this.scale = 1;
-         this.rotation = 0;
-         this.isDragging = false;
-         this.startX = 0;
-         this.startY = 0;
-         this.translateX = 0;
-         this.translateY = 0;
-         
-         // 터치 지원 변수들
-         this.isPinching = false;
-         this.lastDistance = 0;
-         this.touches = [];
-       }
-      
-      init() {
-        const modal = document.getElementById('imageViewerModal');
-        const img = document.getElementById('imageViewerImg');
-        const closeBtn = document.getElementById('imageViewerClose');
-        
-        if (!modal || !img || !closeBtn) return;
-        
-        modal.addEventListener('click', (e) => {
-          if (e.target === modal) this.close();
-        });
-        
-        closeBtn.addEventListener('click', () => this.close());
-        
-        document.addEventListener('keydown', (e) => {
-          if (e.key === 'Escape' && modal.style.display === 'flex') {
-            this.close();
-          }
-        });
-        
-        document.getElementById('zoomIn')?.addEventListener('click', () => this.zoomToCenter(1.2));
-        document.getElementById('zoomOut')?.addEventListener('click', () => this.zoomToCenter(1/1.2));
-        document.getElementById('rotateLeft')?.addEventListener('click', () => this.rotateLeft());
-        document.getElementById('rotateRight')?.addEventListener('click', () => this.rotateRight());
-        document.getElementById('resetView')?.addEventListener('click', () => this.reset());
-        
-        // 드래그 방지 이벤트 추가
-        img.addEventListener('dragstart', (e) => {
-          e.preventDefault();
-          return false;
-        });
-        
-        img.addEventListener('selectstart', (e) => {
-          e.preventDefault();
-          return false;
-        });
-        
-        img.addEventListener('mousedown', (e) => {
-          e.preventDefault();
-          this.startDrag(e);
-        });
-        document.addEventListener('mousemove', (e) => this.drag(e));
-        document.addEventListener('mouseup', () => this.endDrag());
-        
-        // 터치 이벤트
-        img.addEventListener('touchstart', (e) => {
-          e.preventDefault();
-          this.touches = Array.from(e.touches);
-          
-          if (e.touches.length === 1) {
-            // 단일 터치: 드래그 시작
-            this.startDrag(e.touches[0]);
-          } else if (e.touches.length === 2) {
-            // 핀치 줌 시작
-            this.isPinching = true;
-            this.isDragging = false;
-            this.lastDistance = this.getDistance(e.touches[0], e.touches[1]);
-          }
-        });
-        
-        document.addEventListener('touchmove', (e) => {
-          e.preventDefault();
-          
-          if (e.touches.length === 1 && this.isDragging && !this.isPinching) {
-            // 단일 터치 드래그
-            this.drag(e.touches[0]);
-          } else if (e.touches.length === 2 && this.isPinching) {
-            // 핀치 줌
-            const currentDistance = this.getDistance(e.touches[0], e.touches[1]);
-            const scale = currentDistance / this.lastDistance;
-            
-            if (Math.abs(scale - 1) > 0.01) { // 너무 작은 변화는 무시
-              const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-              const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-              const rect = img.getBoundingClientRect();
-              const pointX = centerX - rect.left - rect.width / 2;
-              const pointY = centerY - rect.top - rect.height / 2;
-              
-              this.zoomAtPoint(scale, pointX, pointY);
-              this.lastDistance = currentDistance;
-            }
-          }
-        });
-        
-        document.addEventListener('touchend', (e) => {
-          if (e.touches.length === 0) {
-            this.endDrag();
-            this.isPinching = false;
-          } else if (e.touches.length === 1) {
-            this.isPinching = false;
-            if (!this.isDragging) {
-              this.startDrag(e.touches[0]);
-            }
-          }
-        });
-        
-                          // 마우스 휠 줌 (마우스 위치 중심)
-         img.addEventListener('wheel', (e) => {
-           e.preventDefault();
-           const rect = img.getBoundingClientRect();
-           // 이미지 중심에서 마우스까지의 픽셀 거리
-           const mouseX = e.clientX - rect.left - rect.width / 2;
-           const mouseY = e.clientY - rect.top - rect.height / 2;
-           
-           if (e.deltaY < 0) {
-             this.zoomAtPoint(1.2, mouseX, mouseY);
-           } else {
-             this.zoomAtPoint(1/1.2, mouseX, mouseY);
-           }
-         });
-      }
-      
-      open(imageSrc) {
-        const modal = document.getElementById('imageViewerModal');
-        const img = document.getElementById('imageViewerImg');
-        if (modal && img) {
-          img.src = imageSrc;
-          modal.style.display = 'flex';
-          this.reset();
-          document.body.style.overflow = 'hidden';
+    function toggleZoom(elem) {
+      if (!elem.classList.contains('landscape') && !elem.classList.contains('portrait')) {
+        let width=0, height=0;
+        if (elem.tagName.toLowerCase()==='img') {
+          width=elem.naturalWidth; height=elem.naturalHeight;
+        } else if (elem.tagName.toLowerCase()==='video') {
+          width=elem.videoWidth; height=elem.videoHeight;
+        }
+        if(width && height){
+          if(width>=height) elem.classList.add('landscape');
+          else elem.classList.add('portrait');
         }
       }
-      
-      close() {
-        const modal = document.getElementById('imageViewerModal');
-        if (modal) {
-          modal.style.display = 'none';
-          document.body.style.overflow = 'auto';
-          this.reset();
-        }
-      }
-      
-             updateTransform(smooth = false) {
-         const img = document.getElementById('imageViewerImg');
-         if (img) {
-           if (smooth) {
-             img.style.transition = 'transform 0.3s ease';
-           } else {
-             img.style.transition = 'none';
-           }
-           img.style.transform = \`translate(\${this.translateX}px, \${this.translateY}px) scale(\${this.scale}) rotate(\${this.rotation}deg)\`;
-         }
-       }
-      
-             zoomIn() {
-         this.scale = Math.min(this.scale * 1.2, 5);
-         this.updateTransform(true);
-       }
-       
-       zoomOut() {
-         this.scale = Math.max(this.scale / 1.2, 0.1);
-         this.updateTransform(true);
-       }
-       
-       zoomToCenter(factor) {
-         this.scale = Math.min(Math.max(this.scale * factor, 0.1), 5);
-         this.updateTransform(true);
-       }
-       
-       zoomAtPoint(factor, pointX, pointY) {
-         const oldScale = this.scale;
-         const newScale = Math.min(Math.max(this.scale * factor, 0.1), 5);
-         
-         if (oldScale === newScale) return; // 스케일이 변하지 않으면 리턴
-         
-         // 확대/축소 시 마우스 포인터 위치 고정
-         const scaleDiff = newScale - oldScale;
-         this.translateX -= pointX * scaleDiff;
-         this.translateY -= pointY * scaleDiff;
-         this.scale = newScale;
-         
-         this.updateTransform(); // 확대시 애니메이션 없음
-       }
-      
-              rotateLeft() {
-          this.rotation -= 90;
-          this.updateTransform(true);
-        }
-        
-        rotateRight() {
-          this.rotation += 90;
-          this.updateTransform(true);
-        }
-        
-        reset() {
-          this.scale = 1;
-          this.rotation = 0;
-          this.translateX = 0;
-          this.translateY = 0;
-          this.updateTransform(true);
-        }
-      
-      startDrag(e) {
-        this.isDragging = true;
-        this.startX = e.clientX - this.translateX;
-        this.startY = e.clientY - this.translateY;
-      }
-      
-      drag(e) {
-        if (!this.isDragging) return;
-        e.preventDefault();
-        this.translateX = e.clientX - this.startX;
-        this.translateY = e.clientY - this.startY;
-        this.updateTransform();
-      }
-      
-              endDrag() {
-          this.isDragging = false;
-        }
-        
-        getDistance(touch1, touch2) {
-          const dx = touch1.clientX - touch2.clientX;
-          const dy = touch1.clientY - touch2.clientY;
-          return Math.sqrt(dx * dx + dy * dy);
-        }
+      elem.classList.toggle('expanded');
     }
-    
-    const imageViewer = new ImageViewer();
-    
-    function openImageViewer(imageSrc) {
-      imageViewer.open(imageSrc);
-    }
-    
-    document.addEventListener('DOMContentLoaded', () => {
-      imageViewer.init();
-    });
     document.getElementById('toggleButton')?.addEventListener('click',function(){
       window.location.href='/';
     });
@@ -1796,5 +1490,3 @@ else:
 </body>
 </html>`;
 }
-
-
