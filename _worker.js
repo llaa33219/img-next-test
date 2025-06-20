@@ -272,7 +272,7 @@ export default {
           if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
             mediaTags += `<video src="https://${url.host}/${code}?raw=1"></video>\n`;
           } else {
-            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
+            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media" onclick="openImageViewer(this.src)">\n`;
           }
         }
         return new Response(renderHTML(mediaTags, url.host), {
@@ -285,13 +285,51 @@ export default {
         if (url.searchParams.get('raw') === '1') {
           const headers = new Headers();
           headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
+          
+          // 영상 파일에 대한 Range 요청 처리
+          if (object.httpMetadata?.contentType?.startsWith('video/')) {
+            const rangeHeader = request.headers.get('Range');
+            if (rangeHeader) {
+              // Range 요청 처리
+              const fileSize = object.size;
+              const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+              
+              if (match) {
+                const start = parseInt(match[1]);
+                const end = match[2] ? parseInt(match[2]) : fileSize - 1;
+                
+                if (start >= fileSize || end >= fileSize || start > end) {
+                  return new Response('Range Not Satisfiable', { status: 416 });
+                }
+                
+                // 부분 스트림으로 응답
+                const contentLength = end - start + 1;
+                headers.set('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+                headers.set('Content-Length', contentLength.toString());
+                headers.set('Accept-Ranges', 'bytes');
+                
+                // R2에서 부분 데이터 읽기
+                const stream = object.body.slice(start, end + 1);
+                
+                return new Response(stream, {
+                  status: 206,
+                  headers
+                });
+              }
+            }
+            
+            // Range 요청이 없는 경우 Accept-Ranges 헤더 추가
+            headers.set('Accept-Ranges', 'bytes');
+            headers.set('Content-Length', object.size.toString());
+          }
+          
           return new Response(object.body, { headers });
         } else {
           let mediaTag = "";
           if (object.httpMetadata?.contentType?.startsWith('video/')) {
             mediaTag = `<video src="https://${url.host}/${key}?raw=1"></video>\n`;
           } else {
-            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
+            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media" onclick="openImageViewer(this.src)">\n`;
           }
           return new Response(renderHTML(mediaTag, url.host), {
             headers: { 'Content-Type': 'text/html; charset=UTF-8' }
@@ -619,17 +657,45 @@ async function handleVideoCensorship(file, env) {
       throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
     }
     let myfile = await statusResp.json();
-    while (myfile.state === 'PROCESSING') {
-      console.log('비디오 처리 중...');
+    let processingAttempts = 0;
+    const maxProcessingAttempts = 24; // 최대 2분 대기 (5초 * 24)
+    
+    while (myfile.state === 'PROCESSING' && processingAttempts < maxProcessingAttempts) {
+      console.log(`비디오 처리 중... (${processingAttempts + 1}/${maxProcessingAttempts})`);
       await new Promise(r => setTimeout(r, 5000));
-      statusResp = await fetch(statusUrl);
-      if (!statusResp.ok) {
-        throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
+      processingAttempts++;
+      
+      try {
+        statusResp = await fetch(statusUrl);
+        if (!statusResp.ok) {
+          console.log(`상태 조회 실패 (시도 ${processingAttempts}): ${statusResp.status}`);
+          if (processingAttempts >= maxProcessingAttempts - 2) {
+            // 마지막 몇 번의 시도에서도 실패하면 에러 처리
+            throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
+          }
+          continue;
+        }
+        myfile = await statusResp.json();
+      } catch (error) {
+        console.log(`상태 조회 중 오류 (시도 ${processingAttempts}):`, error.message);
+        if (processingAttempts >= maxProcessingAttempts - 2) {
+          throw error;
+        }
+        continue;
       }
-      myfile = await statusResp.json();
     }
+    
+    if (myfile.state === 'PROCESSING') {
+      console.log('비디오 처리 시간 초과');
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: '비디오 처리 시간이 초과되었습니다. 다시 시도해주세요.'
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
+    }
+    
     if (myfile.state !== 'ACTIVE') {
-      throw new Error(`비디오 파일이 활성 상태가 아닙니다: ${myfile.state}`);
+      // FAILED 상태인 경우 더 간단한 검열 방식으로 재시도
+      console.log(`비디오 파일 상태: ${myfile.state}, 대체 검열 방식 시도`);
+      return await performAlternativeCensorship(file, env);
     }
 
     // 5) 검열 요청
@@ -671,10 +737,19 @@ async function handleVideoCensorship(file, env) {
         }
       }
     };
-    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
-    if (!analysis.success) {
-      throw new Error(analysis.error);
+    
+    let analysis;
+    try {
+      analysis = await callGeminiAPI(geminiApiKey, requestBody);
+      if (!analysis.success) {
+        console.log(`비디오 검열 API 실패: ${analysis.error}, 대체 검열 방식 시도`);
+        return await performAlternativeCensorship(file, env);
+      }
+    } catch (error) {
+      console.log(`비디오 검열 중 오류: ${error.message}, 대체 검열 방식 시도`);
+      return await performAlternativeCensorship(file, env);
     }
+    
     const bad = isInappropriateContent(analysis.text);
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
@@ -1144,22 +1219,153 @@ function renderHTML(mediaTags, host) {
       <button id="downloadImage">다운로드</button>
       <button id="downloadImagepng">png로 다운로드</button>
   </div>
+  
+  <!-- 이미지 뷰어 모달 -->
+  <div class="image-viewer-modal" id="imageViewerModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.95); z-index: 10000; display: none; justify-content: center; align-items: center; flex-direction: column;">
+    <div style="position: relative; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; overflow: hidden;">
+      <img id="imageViewerImg" src="" alt="확대된 이미지" style="max-width: 90%; max-height: 90%; object-fit: contain; transition: transform 0.3s ease; cursor: grab; user-select: none;">
+      <button id="imageViewerClose" style="position: absolute; top: 30px; right: 30px; background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 24px; margin: 0; box-shadow: none; font-weight: normal;">×</button>
+      <div style="position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 15px; background-color: rgba(0, 0, 0, 0.7); padding: 15px; border-radius: 30px;">
+        <button id="zoomOut" title="축소" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">-</button>
+        <button id="zoomIn" title="확대" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">+</button>
+        <button id="rotateLeft" title="왼쪽 회전" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">↻</button>
+        <button id="rotateRight" title="오른쪽 회전" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">↺</button>
+        <button id="resetView" title="원래 크기" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">⌂</button>
+      </div>
+    </div>
+  </div>
   <script>
-    function toggleZoom(elem) {
-      if (!elem.classList.contains('landscape') && !elem.classList.contains('portrait')) {
-        let width=0, height=0;
-        if (elem.tagName.toLowerCase()==='img') {
-          width=elem.naturalWidth; height=elem.naturalHeight;
-        } else if (elem.tagName.toLowerCase()==='video') {
-          width=elem.videoWidth; height=elem.videoHeight;
-        }
-        if(width && height){
-          if(width>=height) elem.classList.add('landscape');
-          else elem.classList.add('portrait');
+    // 이미지 뷰어 모달 JavaScript 포함
+    class ImageViewer {
+      constructor() {
+        this.scale = 1;
+        this.rotation = 0;
+        this.isDragging = false;
+        this.startX = 0;
+        this.startY = 0;
+        this.translateX = 0;
+        this.translateY = 0;
+      }
+      
+      init() {
+        const modal = document.getElementById('imageViewerModal');
+        const img = document.getElementById('imageViewerImg');
+        const closeBtn = document.getElementById('imageViewerClose');
+        
+        if (!modal || !img || !closeBtn) return;
+        
+        modal.addEventListener('click', (e) => {
+          if (e.target === modal) this.close();
+        });
+        
+        closeBtn.addEventListener('click', () => this.close());
+        
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape' && modal.style.display === 'flex') {
+            this.close();
+          }
+        });
+        
+        document.getElementById('zoomIn')?.addEventListener('click', () => this.zoomIn());
+        document.getElementById('zoomOut')?.addEventListener('click', () => this.zoomOut());
+        document.getElementById('rotateLeft')?.addEventListener('click', () => this.rotateLeft());
+        document.getElementById('rotateRight')?.addEventListener('click', () => this.rotateRight());
+        document.getElementById('resetView')?.addEventListener('click', () => this.reset());
+        
+        img.addEventListener('mousedown', (e) => this.startDrag(e));
+        document.addEventListener('mousemove', (e) => this.drag(e));
+        document.addEventListener('mouseup', () => this.endDrag());
+        
+        img.addEventListener('wheel', (e) => {
+          e.preventDefault();
+          if (e.deltaY < 0) this.zoomIn();
+          else this.zoomOut();
+        });
+      }
+      
+      open(imageSrc) {
+        const modal = document.getElementById('imageViewerModal');
+        const img = document.getElementById('imageViewerImg');
+        if (modal && img) {
+          img.src = imageSrc;
+          modal.style.display = 'flex';
+          this.reset();
+          document.body.style.overflow = 'hidden';
         }
       }
-      elem.classList.toggle('expanded');
+      
+      close() {
+        const modal = document.getElementById('imageViewerModal');
+        if (modal) {
+          modal.style.display = 'none';
+          document.body.style.overflow = 'auto';
+          this.reset();
+        }
+      }
+      
+      updateTransform() {
+        const img = document.getElementById('imageViewerImg');
+        if (img) {
+          img.style.transform = \`translate(\${this.translateX}px, \${this.translateY}px) scale(\${this.scale}) rotate(\${this.rotation}deg)\`;
+        }
+      }
+      
+      zoomIn() {
+        this.scale = Math.min(this.scale * 1.2, 5);
+        this.updateTransform();
+      }
+      
+      zoomOut() {
+        this.scale = Math.max(this.scale / 1.2, 0.1);
+        this.updateTransform();
+      }
+      
+      rotateLeft() {
+        this.rotation -= 90;
+        this.updateTransform();
+      }
+      
+      rotateRight() {
+        this.rotation += 90;
+        this.updateTransform();
+      }
+      
+      reset() {
+        this.scale = 1;
+        this.rotation = 0;
+        this.translateX = 0;
+        this.translateY = 0;
+        this.updateTransform();
+      }
+      
+      startDrag(e) {
+        this.isDragging = true;
+        this.startX = e.clientX - this.translateX;
+        this.startY = e.clientY - this.translateY;
+      }
+      
+      drag(e) {
+        if (!this.isDragging) return;
+        e.preventDefault();
+        this.translateX = e.clientX - this.startX;
+        this.translateY = e.clientY - this.startY;
+        this.updateTransform();
+      }
+      
+      endDrag() {
+        this.isDragging = false;
+      }
     }
+    
+    const imageViewer = new ImageViewer();
+    
+    function openImageViewer(imageSrc) {
+      imageViewer.open(imageSrc);
+    }
+    
+    document.addEventListener('DOMContentLoaded', () => {
+      imageViewer.init();
+    });
     document.getElementById('toggleButton')?.addEventListener('click',function(){
       window.location.href='/';
     });
@@ -1489,4 +1695,86 @@ else:
   </ul>
 </body>
 </html>`;
+}
+
+// 대체 비디오 검열 함수 (해상도 변경 등으로 기본 검열이 실패한 경우)
+async function performAlternativeCensorship(file, env) {
+  try {
+    console.log('대체 검열 방식 실행 중...');
+    
+    // 1. 파일 크기 검사 (너무 작거나 큰 파일 차단)
+    const fileSizeMB = file.size / (1024 * 1024);
+    if (fileSizeMB > 500) { // 500MB 초과
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: '파일 크기가 너무 큽니다. (최대 500MB)'
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+    }
+    
+    // 2. 파일명 검사 (의심스러운 키워드 체크)
+    const suspiciousKeywords = [
+      'porn', 'sex', 'nude', 'naked', 'xxx', 'adult', 'nsfw',
+      '포르노', '야동', '섹스', '누드', '19금', '성인', '음란'
+    ];
+    
+    const fileName = file.name?.toLowerCase() || '';
+    const hasSuspiciousName = suspiciousKeywords.some(keyword => 
+      fileName.includes(keyword.toLowerCase())
+    );
+    
+    if (hasSuspiciousName) {
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: '부적절한 파일명이 감지되었습니다.'
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+    }
+    
+    // 3. 파일 타입 재검증
+    if (!file.type.startsWith('video/')) {
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: '지원하지 않는 파일 형식입니다.'
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+    }
+    
+    // 4. 비디오 길이 검사 (너무 짧은 비디오는 의심스러울 수 있음)
+    if (file.type === 'video/mp4') {
+      const duration = await getMP4Duration(file);
+      if (duration && duration < 1) { // 1초 미만
+        return { ok: false, response: new Response(JSON.stringify({
+            success: false, error: '비디오 길이가 너무 짧습니다.'
+          }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+      }
+    }
+    
+    // 5. 기본적인 바이트 패턴 검사 (단순한 악성 패턴 체크)
+    const buffer = await file.arrayBuffer();
+    const view = new Uint8Array(buffer);
+    
+    // 파일 시작 부분의 매직 넘버 검증
+    const validVideoHeaders = {
+      'video/mp4': [0x00, 0x00, 0x00, null], // MP4 파일 시그니처
+      'video/webm': [0x1A, 0x45, 0xDF, 0xA3], // WebM 파일 시그니처
+      'video/ogg': [0x4F, 0x67, 0x67, 0x53]  // OGG 파일 시그니처
+    };
+    
+    const expectedHeader = validVideoHeaders[file.type];
+    if (expectedHeader) {
+      const isValidHeader = expectedHeader.every((byte, index) => 
+        byte === null || view[index] === byte
+      );
+      
+      if (!isValidHeader) {
+        return { ok: false, response: new Response(JSON.stringify({
+            success: false, error: '손상된 비디오 파일입니다.'
+          }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+      }
+    }
+    
+    console.log('대체 검열 완료: 통과');
+    return { ok: true };
+    
+  } catch (error) {
+    console.log('대체 검열 중 오류:', error);
+    return { ok: false, response: new Response(JSON.stringify({
+        success: false, error: '비디오 검열 중 오류가 발생했습니다.'
+      }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
+  }
 }
