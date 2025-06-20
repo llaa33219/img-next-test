@@ -1222,7 +1222,7 @@ function renderHTML(mediaTags, host) {
         <button class="control-btn" id="zoomOut" title="축소">-</button>
         <button class="control-btn" id="rotateLeft" title="왼쪽 회전">↶</button>
         <button class="control-btn" id="rotateRight" title="오른쪽 회전">↷</button>
-        <button class="control-btn" id="resetView" title="원래 크기">⌂</button>
+        <button class="control-btn" id="resetView" title="원래 크기">⟲</button>
       </div>
     </div>
   </div>
