@@ -635,21 +635,42 @@ async function callGeminiAPI(apiKey, requestBody) {
         return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
       const data = await response.json();
-      const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!content) {
-        // 안전한 디버깅 정보만 로그
+      
+      // Gemini 2.5 Flash의 새로운 응답 구조 처리
+      const candidate = data.candidates?.[0];
+      if (!candidate?.content?.parts) {
         console.log('Gemini API 응답 상태:', {
           hasCandidates: !!data.candidates,
           candidatesLength: data.candidates?.length || 0,
-          hasContent: !!data.candidates?.[0]?.content,
-          hasParts: !!data.candidates?.[0]?.content?.parts,
-          partsLength: data.candidates?.[0]?.content?.parts?.length || 0,
-          hasText: !!data.candidates?.[0]?.content?.parts?.[0]?.text,
+          hasContent: !!candidate?.content,
+          hasParts: !!candidate?.content?.parts,
           responseKeys: Object.keys(data || {})
         });
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
-      return { success: true, text: content };
+
+      // parts 배열에서 실제 응답 텍스트 찾기 (thought가 false이거나 없는 것)
+      let responseText = '';
+      for (const part of candidate.content.parts) {
+        if (part.text && (!part.thought || part.thought === false)) {
+          responseText += part.text;
+        }
+      }
+
+      // 실제 응답 텍스트가 없으면 첫 번째 텍스트 사용 (하위 호환성)
+      if (!responseText && candidate.content.parts[0]?.text) {
+        responseText = candidate.content.parts[0].text;
+      }
+
+      if (!responseText) {
+        console.log('Gemini API 응답 파싱 실패:', {
+          partsCount: candidate.content.parts.length,
+          parts: candidate.content.parts.map(p => ({ hasText: !!p.text, thought: p.thought }))
+        });
+        return { success: false, error: 'Gemini API 응답에서 텍스트를 추출할 수 없습니다.' };
+      }
+
+      return { success: true, text: responseText };
     } catch (e) {
       retryCount++;
       console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
