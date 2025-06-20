@@ -600,7 +600,7 @@ async function handleVideoCensorship(file, env) {
         topP: 0.95, 
         maxOutputTokens: 256,
         thinkingConfig: {
-          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
+          thinkingBudget: 1  // Thinking 모드 비활성화로 성능 최적화
         }
       }
     };
