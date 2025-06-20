@@ -1206,7 +1206,7 @@ function renderHTML(mediaTags, host) {
   <div id="imageModal" class="image-modal">
     <span class="modal-close" id="modalClose">&times;</span>
     <div class="modal-content">
-      <img id="modalImage" class="modal-image" src="" alt="확대된 이미지">
+      <img id="modalImage" class="modal-image" src="" alt="확대된 이미지" draggable="false">
       <div class="modal-controls">
         <button class="control-btn" id="zoomIn" title="확대">+</button>
         <button class="control-btn" id="zoomOut" title="축소">-</button>
@@ -1261,10 +1261,13 @@ function renderHTML(mediaTags, host) {
         this.rotateRightBtn.addEventListener('click', () => this.rotateRight());
         this.resetBtn.addEventListener('click', () => this.resetView());
         
-        // 드래그 이벤트
-        this.modalImage.addEventListener('mousedown', (e) => this.startDrag(e));
-        document.addEventListener('mousemove', (e) => this.drag(e));
-        document.addEventListener('mouseup', () => this.endDrag());
+                 // 드래그 이벤트
+         this.modalImage.addEventListener('mousedown', (e) => this.startDrag(e));
+         document.addEventListener('mousemove', (e) => this.drag(e));
+         document.addEventListener('mouseup', () => this.endDrag());
+         
+         // 브라우저 기본 드래그 방지
+         this.modalImage.addEventListener('dragstart', (e) => e.preventDefault());
         
         // 마우스 휠로 확대/축소
         this.modalImage.addEventListener('wheel', (e) => this.handleWheel(e));
