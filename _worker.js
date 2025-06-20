@@ -431,24 +431,33 @@ async function handleImageCensorship(file, env) {
       contents: [{
         parts: [
           { text:
-            "이 이미지에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
-            "1. 노출/선정적 이미지: true/false\n" +
-            "2. 폭력/무기: true/false\n" +
-            "3. 약물/알코올: true/false\n" +
-            "4. 욕설/혐오 표현: true/false\n" +
-            "5. 기타 유해 콘텐츠: true/false\n\n" +
-            "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
+            "Analyze this image for inappropriate content across multiple categories. Be thorough but avoid false positives for legitimate content. " +
+            "Pay special attention to text (including partially obscured, noisy, or stylized text), attempts to bypass detection, and context. " +
+            "Answer only true/false for each category:\n\n" +
+            "1. Sexual/NSFW content (explicit nudity, sexual acts, suggestive poses): true/false\n" +
+            "2. Violence/weapons (graphic violence, weapons, blood, gore): true/false\n" +
+            "3. Drugs/substances (illegal drugs, drug paraphernalia, excessive alcohol): true/false\n" +
+            "4. Hate speech/offensive content (hate symbols, discriminatory content, offensive gestures): true/false\n" +
+            "5. Illegal activities (criminal acts, fraud, illegal sales): true/false\n" +
+            "6. Self-harm content (cutting, suicide imagery, dangerous challenges): true/false\n" +
+            "7. Minor safety (content harmful to children, inappropriate for minors): true/false\n" +
+            "8. Offensive text (profanity, slurs, threats - including partially hidden, stylized, or noisy text): true/false\n" +
+            "9. Detection bypass attempts (deliberate noise, partial covering, obfuscation to hide violations): true/false\n" +
+            "10. Spam/scam content (phishing attempts, fake promotions, misleading claims): true/false\n\n" +
+            "Consider context and intent. Artistic, educational, medical, or news content should generally not be flagged unless extremely graphic. " +
+            "Answer each line with only the number and true/false. Do not provide explanations."
            },
           { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
       }],
       generationConfig: { 
-        temperature: 0.1, 
-        topK: 40, 
-        topP: 0.95, 
-        maxOutputTokens: 256,
+        temperature: 0.05,  // 더 일관적인 응답을 위해 낮춤
+        topK: 20,           // 더 정확한 토큰 선택을 위해 줄임
+        topP: 0.8,          // 더 정확한 응답을 위해 줄임
+        maxOutputTokens: 512,
+        candidateCount: 1,
         thinkingConfig: {
-          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
+          thinkingBudget: 0
         }
       }
     };
@@ -583,24 +592,33 @@ async function handleVideoCensorship(file, env) {
       contents: [{
         parts: [
           { text:
-              "이 비디오에 부적절한 콘텐츠가 포함되어 있는지 확인해주세요. 각 카테고리별로 true 또는 false로만 답변해주세요:\n\n" +
-              "1. 노출/선정적 이미지: true/false\n" +
-              "2. 폭력/무기: true/false\n" +
-              "3. 약물/알코올: true/false\n" +
-              "4. 욕설/혐오 표현: true/false\n" +
-              "5. 기타 유해 콘텐츠: true/false\n\n" +
-              "각 줄에 숫자와 true/false만 답변하세요. 추가 설명은 하지 마세요."
+              "Analyze this video for inappropriate content across multiple categories. Be thorough but avoid false positives for legitimate content. " +
+              "Pay special attention to audio content, text overlays (including partially obscured, noisy, or stylized text), attempts to bypass detection, and context throughout the video. " +
+              "Answer only true/false for each category:\n\n" +
+              "1. Sexual/NSFW content (explicit nudity, sexual acts, suggestive poses): true/false\n" +
+              "2. Violence/weapons (graphic violence, weapons, blood, gore): true/false\n" +
+              "3. Drugs/substances (illegal drugs, drug paraphernalia, excessive alcohol): true/false\n" +
+              "4. Hate speech/offensive content (hate symbols, discriminatory content, offensive gestures, audio slurs): true/false\n" +
+              "5. Illegal activities (criminal acts, fraud, illegal sales): true/false\n" +
+              "6. Self-harm content (cutting, suicide imagery, dangerous challenges): true/false\n" +
+              "7. Minor safety (content harmful to children, inappropriate for minors): true/false\n" +
+              "8. Offensive text/audio (profanity, slurs, threats - including partially hidden, stylized, or noisy text/audio): true/false\n" +
+              "9. Detection bypass attempts (deliberate noise, partial covering, obfuscation to hide violations): true/false\n" +
+              "10. Spam/scam content (phishing attempts, fake promotions, misleading claims): true/false\n\n" +
+              "Consider context and intent. Artistic, educational, medical, or news content should generally not be flagged unless extremely graphic. " +
+              "Answer each line with only the number and true/false. Do not provide explanations."
              },
           { file_data: { mime_type: file.type, file_uri: fileUri } }
         ]
       }],
       generationConfig: { 
-        temperature: 0.1, 
-        topK: 40, 
-        topP: 0.95, 
-        maxOutputTokens: 256,
+        temperature: 0.05,  // 더 일관적인 응답을 위해 낮춤
+        topK: 20,           // 더 정확한 토큰 선택을 위해 줄임
+        topP: 0.8,          // 더 정확한 응답을 위해 줄임
+        maxOutputTokens: 512,
+        candidateCount: 1,
         thinkingConfig: {
-          thinkingBudget: 1  // Thinking 모드 비활성화로 성능 최적화
+          thinkingBudget: 0
         }
       }
     };
@@ -629,7 +647,7 @@ async function callGeminiAPI(apiKey, requestBody) {
   const maxRetries = 3, retryDelay = 2000;
   while (retryCount < maxRetries) {
     try {
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`;
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -701,40 +719,52 @@ async function callGeminiAPI(apiKey, requestBody) {
 }
 
 // =======================
-// 부적절한 내용 분석 함수 (교체 버전)
+// 부적절한 내용 분석 함수 (강화된 10개 카테고리 버전)
 // =======================
 function isInappropriateContent(responseText) {
   // 카테고리 인덱스 → 사용자 표시용 이름 매핑
   const categoryMap = {
-    1: '선정적 콘텐츠',
+    1: '선정적/성인 콘텐츠',
     2: '폭력/무기 콘텐츠',
-    3: '약물/알코올 관련 콘텐츠',
-    4: '욕설/혐오 표현',
-    5: '기타 유해 콘텐츠'
+    3: '약물/물질 남용 콘텐츠',
+    4: '혐오/차별 표현',
+    5: '불법 활동 콘텐츠',
+    6: '자해/위험 콘텐츠',
+    7: '미성년자 유해 콘텐츠',
+    8: '욕설/모독적 텍스트/음성',
+    9: '검열 우회 시도',
+    10: '스팸/사기 콘텐츠'
   };
 
   // 결과 저장소
   const flagged = [];
 
   // 응답을 줄별로 순회하며 다양한 패턴 파싱
-  responseText.split(/\r?\n/).forEach(line => {
+  const lines = responseText.split(/\r?\n/);
+  lines.forEach((line, lineIndex) => {
     // 패턴 1: "숫자. true/false" 형태
-    let m = line.match(/^\s*([1-5])\.\s*(true|false)\b/i);
+    let m = line.match(/^\s*([1-9]|10)\.\s*(true|false)\b/i);
     if (!m) {
       // 패턴 2: "숫자: true/false" 형태
-      m = line.match(/^\s*([1-5]):\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|10):\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 3: "숫자 - true/false" 형태
-      m = line.match(/^\s*([1-5])\s*[-–]\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|10)\s*[-–]\s*(true|false)\b/i);
     }
     if (!m) {
-      // 패턴 4: 단순히 "true" 또는 "false"만 있는 경우 (순서대로 1-5 매핑)
+      // 패턴 4: "숫자) true/false" 형태
+      m = line.match(/^\s*([1-9]|10)\)\s*(true|false)\b/i);
+    }
+    if (!m) {
+      // 패턴 5: 단순히 "true" 또는 "false"만 있는 경우 (순서대로 1-10 매핑)
       const trueMatch = line.match(/^\s*(true|false)\b/i);
-      if (trueMatch) {
-        const lineIndex = responseText.split(/\r?\n/).indexOf(line);
-        if (lineIndex >= 0 && lineIndex < 5) {
-          m = [null, (lineIndex + 1).toString(), trueMatch[1]];
+      if (trueMatch && lineIndex < 10) {
+        // 빈 줄을 건너뛰고 실제 답변 줄만 카운트
+        const nonEmptyIndex = lines.slice(0, lineIndex + 1)
+          .filter(l => l.trim() && l.match(/^\s*(true|false)\b/i)).length;
+        if (nonEmptyIndex >= 1 && nonEmptyIndex <= 10) {
+          m = [null, nonEmptyIndex.toString(), trueMatch[1]];
         }
       }
     }
