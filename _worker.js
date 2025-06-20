@@ -612,7 +612,7 @@ async function handleVideoCensorship(file, env) {
         ]
       }],
       generationConfig: { 
-        temperature: 0.05,  // 더 일관적인 응답을 위해 낮춤
+        temperature: 0.1,  // 더 일관적인 응답을 위해 낮춤
         topK: 20,           // 더 정확한 토큰 선택을 위해 줄임
         topP: 0.8,          // 더 정확한 응답을 위해 줄임
         maxOutputTokens: 512,
