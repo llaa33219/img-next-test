@@ -1223,7 +1223,7 @@ function renderHTML(mediaTags, host) {
   <!-- 이미지 뷰어 모달 -->
   <div class="image-viewer-modal" id="imageViewerModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.95); z-index: 10000; display: none; justify-content: center; align-items: center; flex-direction: column;">
     <div style="position: relative; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; overflow: hidden;">
-             <img id="imageViewerImg" src="" alt="확대된 이미지" draggable="false" style="max-width: 90%; max-height: 90%; object-fit: contain; transition: transform 0.3s ease; cursor: grab; user-select: none; -webkit-user-drag: none; -khtml-user-drag: none; -moz-user-drag: none; -o-user-drag: none; pointer-events: auto;">
+             <img id="imageViewerImg" src="" alt="확대된 이미지" draggable="false" style="max-width: 90%; max-height: 90%; object-fit: contain; cursor: grab; user-select: none; -webkit-user-drag: none; -khtml-user-drag: none; -moz-user-drag: none; -o-user-drag: none; pointer-events: auto;">
       <button id="imageViewerClose" style="position: absolute; top: 30px; right: 30px; background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 24px; margin: 0; box-shadow: none; font-weight: normal;">×</button>
       <div style="position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 15px; background-color: rgba(0, 0, 0, 0.7); padding: 15px; border-radius: 30px;">
         <button id="zoomOut" title="축소" style="background-color: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.4); color: white; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 20px; margin: 0; box-shadow: none; font-weight: normal;">-</button>
@@ -1303,19 +1303,20 @@ function renderHTML(mediaTags, host) {
         });
         document.addEventListener('touchend', () => this.endDrag());
         
-        // 마우스 휠 줌 (마우스 위치 중심)
-        img.addEventListener('wheel', (e) => {
-          e.preventDefault();
-          const rect = img.getBoundingClientRect();
-          const mouseX = e.clientX - rect.left - rect.width / 2;
-          const mouseY = e.clientY - rect.top - rect.height / 2;
-          
-          if (e.deltaY < 0) {
-            this.zoomAtPoint(1.2, mouseX, mouseY);
-          } else {
-            this.zoomAtPoint(1/1.2, mouseX, mouseY);
-          }
-        });
+                 // 마우스 휠 줌 (마우스 위치 중심)
+         img.addEventListener('wheel', (e) => {
+           e.preventDefault();
+           const rect = img.getBoundingClientRect();
+           // 이미지 중심에서 마우스까지의 상대적 위치
+           const mouseX = (e.clientX - rect.left - rect.width / 2) / this.scale;
+           const mouseY = (e.clientY - rect.top - rect.height / 2) / this.scale;
+           
+           if (e.deltaY < 0) {
+             this.zoomAtPoint(1.2, mouseX, mouseY);
+           } else {
+             this.zoomAtPoint(1/1.2, mouseX, mouseY);
+           }
+         });
       }
       
       open(imageSrc) {
@@ -1338,57 +1339,67 @@ function renderHTML(mediaTags, host) {
         }
       }
       
-      updateTransform() {
-        const img = document.getElementById('imageViewerImg');
-        if (img) {
-          img.style.transform = \`translate(\${this.translateX}px, \${this.translateY}px) scale(\${this.scale}) rotate(\${this.rotation}deg)\`;
-        }
-      }
+             updateTransform(smooth = false) {
+         const img = document.getElementById('imageViewerImg');
+         if (img) {
+           if (smooth) {
+             img.style.transition = 'transform 0.3s ease';
+           } else {
+             img.style.transition = 'none';
+           }
+           img.style.transform = \`translate(\${this.translateX}px, \${this.translateY}px) scale(\${this.scale}) rotate(\${this.rotation}deg)\`;
+         }
+       }
       
              zoomIn() {
          this.scale = Math.min(this.scale * 1.2, 5);
-         this.updateTransform();
+         this.updateTransform(true);
        }
        
        zoomOut() {
          this.scale = Math.max(this.scale / 1.2, 0.1);
-         this.updateTransform();
+         this.updateTransform(true);
        }
        
        zoomToCenter(factor) {
          this.scale = Math.min(Math.max(this.scale * factor, 0.1), 5);
-         this.updateTransform();
+         this.updateTransform(true);
        }
        
        zoomAtPoint(factor, pointX, pointY) {
+         const oldScale = this.scale;
          const newScale = Math.min(Math.max(this.scale * factor, 0.1), 5);
          
-         // 확대/축소 시 마우스 위치가 고정되도록 translate 조정
-         const scaleChange = newScale / this.scale;
-         this.translateX = pointX - scaleChange * (pointX - this.translateX);
-         this.translateY = pointY - scaleChange * (pointY - this.translateY);
+         if (oldScale === newScale) return; // 스케일이 변하지 않으면 리턴
+         
+         // 마우스 위치를 이미지 좌표계로 변환
+         const scaleRatio = newScale / oldScale;
+         
+         // 현재 translate를 고려한 마우스 위치에서 확대/축소
+         this.translateX = this.translateX + pointX * (1 - scaleRatio);
+         this.translateY = this.translateY + pointY * (1 - scaleRatio);
          this.scale = newScale;
          
          this.updateTransform();
        }
       
-      rotateLeft() {
-        this.rotation -= 90;
-        this.updateTransform();
-      }
-      
-      rotateRight() {
-        this.rotation += 90;
-        this.updateTransform();
-      }
-      
-      reset() {
-        this.scale = 1;
-        this.rotation = 0;
-        this.translateX = 0;
-        this.translateY = 0;
-        this.updateTransform();
-      }
+              rotateLeft() {
+          this.rotation -= 90;
+          this.updateTransform(true);
+        }
+        
+        rotateRight() {
+          this.rotation += 90;
+          this.updateTransform(true);
+        }
+        
+        reset() {
+          this.scale = 1;
+          this.rotation = 0;
+          this.translateX = 0;
+          this.translateY = 0;
+          this.updateTransform(true);
+        }
       
       startDrag(e) {
         this.isDragging = true;
