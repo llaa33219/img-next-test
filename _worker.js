@@ -272,7 +272,7 @@ export default {
           if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
             mediaTags += `<video src="https://${url.host}/${code}?raw=1"></video>\n`;
           } else {
-            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
+            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media">\n`;
           }
         }
         return new Response(renderHTML(mediaTags, url.host), {
@@ -291,7 +291,7 @@ export default {
           if (object.httpMetadata?.contentType?.startsWith('video/')) {
             mediaTag = `<video src="https://${url.host}/${key}?raw=1"></video>\n`;
           } else {
-            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media" onclick="toggleZoom(this)">\n`;
+            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media">\n`;
           }
           return new Response(renderHTML(mediaTag, url.host), {
             headers: { 'Content-Type': 'text/html; charset=UTF-8' }
@@ -1018,23 +1018,86 @@ function renderHTML(mediaTags, host) {
       max-width: 40vw;
       cursor: zoom-in;
     }
-  
-    #imageContainer img.expanded.landscape,
-    #imageContainer video.expanded.landscape {
-      width: 80vw;
-      height: auto;
-      max-width: 80vw;
-      max-height: 100vh;
-      cursor: zoom-out;
+
+    /* 전체화면 모달 스타일 */
+    .image-modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.9);
     }
-  
-    #imageContainer img.expanded.portrait,
-    #imageContainer video.expanded.portrait {
-      width: auto;
-      height: 100vh;
-      max-width: 80vw;
-      max-height: 100vh;
-      cursor: zoom-out;
+
+    .modal-content {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .modal-image {
+      max-width: 90%;
+      max-height: 90%;
+      transform-origin: center;
+      transition: transform 0.3s ease;
+      cursor: grab;
+    }
+
+    .modal-image:active {
+      cursor: grabbing;
+    }
+
+    /* 컨트롤 패널 */
+    .modal-controls {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 10px;
+      border-radius: 25px;
+    }
+
+    .control-btn {
+      background: rgba(255, 255, 255, 0.2);
+      border: none;
+      color: white;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      transition: background 0.3s ease;
+    }
+
+    .control-btn:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+
+    /* 닫기 버튼 */
+    .modal-close {
+      position: absolute;
+      top: 20px;
+      right: 30px;
+      color: white;
+      font-size: 40px;
+      font-weight: bold;
+      cursor: pointer;
+      z-index: 1001;
+    }
+
+    .modal-close:hover {
+      opacity: 0.7;
     }
   
     .container {
@@ -1138,6 +1201,22 @@ function renderHTML(mediaTags, host) {
   <div id="imageContainer">
     ${mediaTags}
   </div>
+  
+  <!-- 전체화면 이미지 모달 -->
+  <div id="imageModal" class="image-modal">
+    <span class="modal-close" id="modalClose">&times;</span>
+    <div class="modal-content">
+      <img id="modalImage" class="modal-image" src="" alt="확대된 이미지">
+      <div class="modal-controls">
+        <button class="control-btn" id="zoomIn" title="확대">+</button>
+        <button class="control-btn" id="zoomOut" title="축소">-</button>
+        <button class="control-btn" id="rotateLeft" title="왼쪽 회전">↶</button>
+        <button class="control-btn" id="rotateRight" title="오른쪽 회전">↷</button>
+        <button class="control-btn" id="resetView" title="원래 크기">⌂</button>
+      </div>
+    </div>
+  </div>
+  
   <div class="custom-context-menu" id="customContextMenu" style="display: none;">
       <button id="copyImage">이미지 복사</button>
       <button id="copyImageurl">이미지 링크 복사</button>
@@ -1145,21 +1224,156 @@ function renderHTML(mediaTags, host) {
       <button id="downloadImagepng">png로 다운로드</button>
   </div>
   <script>
-    function toggleZoom(elem) {
-      if (!elem.classList.contains('landscape') && !elem.classList.contains('portrait')) {
-        let width=0, height=0;
-        if (elem.tagName.toLowerCase()==='img') {
-          width=elem.naturalWidth; height=elem.naturalHeight;
-        } else if (elem.tagName.toLowerCase()==='video') {
-          width=elem.videoWidth; height=elem.videoHeight;
-        }
-        if(width && height){
-          if(width>=height) elem.classList.add('landscape');
-          else elem.classList.add('portrait');
+    // 새로운 이미지 뷰어 기능
+    class ImageViewer {
+      constructor() {
+        this.modal = document.getElementById('imageModal');
+        this.modalImage = document.getElementById('modalImage');
+        this.closeBtn = document.getElementById('modalClose');
+        this.zoomInBtn = document.getElementById('zoomIn');
+        this.zoomOutBtn = document.getElementById('zoomOut');
+        this.rotateLeftBtn = document.getElementById('rotateLeft');
+        this.rotateRightBtn = document.getElementById('rotateRight');
+        this.resetBtn = document.getElementById('resetView');
+        
+        this.scale = 1;
+        this.rotation = 0;
+        this.posX = 0;
+        this.posY = 0;
+        this.isDragging = false;
+        this.startX = 0;
+        this.startY = 0;
+        
+        this.init();
+      }
+      
+      init() {
+        // 이벤트 리스너 등록
+        this.closeBtn.addEventListener('click', () => this.closeModal());
+        this.modal.addEventListener('click', (e) => {
+          if (e.target === this.modal) this.closeModal();
+        });
+        
+        // 컨트롤 버튼 이벤트
+        this.zoomInBtn.addEventListener('click', () => this.zoomIn());
+        this.zoomOutBtn.addEventListener('click', () => this.zoomOut());
+        this.rotateLeftBtn.addEventListener('click', () => this.rotateLeft());
+        this.rotateRightBtn.addEventListener('click', () => this.rotateRight());
+        this.resetBtn.addEventListener('click', () => this.resetView());
+        
+        // 드래그 이벤트
+        this.modalImage.addEventListener('mousedown', (e) => this.startDrag(e));
+        document.addEventListener('mousemove', (e) => this.drag(e));
+        document.addEventListener('mouseup', () => this.endDrag());
+        
+        // 마우스 휠로 확대/축소
+        this.modalImage.addEventListener('wheel', (e) => this.handleWheel(e));
+        
+        // ESC 키로 닫기
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape' && this.modal.style.display === 'block') {
+            this.closeModal();
+          }
+        });
+        
+        // 이미지 클릭 이벤트 등록
+        this.setupImageClickHandlers();
+      }
+      
+      setupImageClickHandlers() {
+        document.querySelectorAll('#imageContainer img').forEach(img => {
+          this.addClickHandler(img);
+        });
+      }
+      
+      addClickHandler(img) {
+        img.addEventListener('click', (e) => {
+          e.preventDefault();
+          this.openModal(img.src);
+        });
+      }
+      
+      openModal(imageSrc) {
+        this.modalImage.src = imageSrc;
+        this.modal.style.display = 'block';
+        this.resetView();
+        document.body.style.overflow = 'hidden';
+      }
+      
+      closeModal() {
+        this.modal.style.display = 'none';
+        document.body.style.overflow = 'auto';
+      }
+      
+      zoomIn() {
+        this.scale = Math.min(this.scale * 1.2, 5);
+        this.updateTransform();
+      }
+      
+      zoomOut() {
+        this.scale = Math.max(this.scale / 1.2, 0.1);
+        this.updateTransform();
+      }
+      
+      rotateLeft() {
+        this.rotation -= 90;
+        this.updateTransform();
+      }
+      
+      rotateRight() {
+        this.rotation += 90;
+        this.updateTransform();
+      }
+      
+      resetView() {
+        this.scale = 1;
+        this.rotation = 0;
+        this.posX = 0;
+        this.posY = 0;
+        this.updateTransform();
+      }
+      
+      startDrag(e) {
+        if (this.scale > 1) {
+          this.isDragging = true;
+          this.startX = e.clientX - this.posX;
+          this.startY = e.clientY - this.posY;
+          e.preventDefault();
         }
       }
-      elem.classList.toggle('expanded');
+      
+      drag(e) {
+        if (this.isDragging) {
+          this.posX = e.clientX - this.startX;
+          this.posY = e.clientY - this.startY;
+          this.updateTransform();
+        }
+      }
+      
+      endDrag() {
+        this.isDragging = false;
+      }
+      
+      handleWheel(e) {
+        e.preventDefault();
+        if (e.deltaY < 0) {
+          this.zoomIn();
+        } else {
+          this.zoomOut();
+        }
+      }
+      
+      updateTransform() {
+        const transform = \`translate(\${this.posX}px, \${this.posY}px) scale(\${this.scale}) rotate(\${this.rotation}deg)\`;
+        this.modalImage.style.transform = transform;
+      }
     }
+    
+    // 이미지 뷰어 초기화
+    document.addEventListener('DOMContentLoaded', () => {
+      new ImageViewer();
+    });
+    
     document.getElementById('toggleButton')?.addEventListener('click',function(){
       window.location.href='/';
     });
