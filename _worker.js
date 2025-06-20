@@ -270,7 +270,7 @@ export default {
         let mediaTags = "";
         for (const { code, object } of objects) {
           if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTags += `<video src="https://${url.host}/${code}?raw=1"></video>\n`;
+            mediaTags += `<div class="player-container"><video controls preload="metadata" src="https://${url.host}/${code}?raw=1"></video></div>\n`;
           } else {
             mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media" onclick="openImageViewer(this.src)">\n`;
           }
@@ -327,7 +327,7 @@ export default {
         } else {
           let mediaTag = "";
           if (object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTag = `<video src="https://${url.host}/${key}?raw=1"></video>\n`;
+            mediaTag = `<div class="player-container"><video controls preload="metadata" src="https://${url.host}/${key}?raw=1"></video></div>\n`;
           } else {
             mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media" onclick="openImageViewer(this.src)">\n`;
           }
@@ -693,9 +693,10 @@ async function handleVideoCensorship(file, env) {
     }
     
     if (myfile.state !== 'ACTIVE') {
-      // FAILED 상태인 경우 더 간단한 검열 방식으로 재시도
-      console.log(`비디오 파일 상태: ${myfile.state}, 대체 검열 방식 시도`);
-      return await performAlternativeCensorship(file, env);
+      console.log(`비디오 파일 상태: ${myfile.state}, 검열 불가능`);
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: `비디오 파일 처리 실패: ${myfile.state}. 다시 시도해주세요.`
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
     }
 
     // 5) 검열 요청
@@ -742,12 +743,16 @@ async function handleVideoCensorship(file, env) {
     try {
       analysis = await callGeminiAPI(geminiApiKey, requestBody);
       if (!analysis.success) {
-        console.log(`비디오 검열 API 실패: ${analysis.error}, 대체 검열 방식 시도`);
-        return await performAlternativeCensorship(file, env);
+        console.log(`비디오 검열 API 실패: ${analysis.error}`);
+        return { ok: false, response: new Response(JSON.stringify({
+            success: false, error: `비디오 검열 실패: ${analysis.error}`
+          }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
       }
     } catch (error) {
-      console.log(`비디오 검열 중 오류: ${error.message}, 대체 검열 방식 시도`);
-      return await performAlternativeCensorship(file, env);
+      console.log(`비디오 검열 중 오류: ${error.message}`);
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: `비디오 검열 중 오류가 발생했습니다: ${error.message}`
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
     }
     
     const bad = isInappropriateContent(analysis.text);
@@ -943,23 +948,7 @@ function isInappropriateContent(responseText) {
 }
 
 // MP4 재생길이 간단 추출 함수
-async function getMP4Duration(file) {
-  try {
-    const buffer = await file.arrayBuffer(), dv = new DataView(buffer), u = new Uint8Array(buffer);
-    for (let i=0; i<u.length-4; i++) {
-      if (u[i]===109 && u[i+1]===118 && u[i+2]===104 && u[i+3]===100) {
-        const vs = dv.getUint8(i-4+8);
-        const ts = vs===0 ? dv.getUint32(i-4+20) : dv.getUint32(i-4+28);
-        const du = vs===0 ? dv.getUint32(i-4+24) : (dv.getUint32(i-4+32)*2**32 + dv.getUint32(i-4+36));
-        return du/ts;
-      }
-    }
-    return null;
-  } catch (e) {
-    console.log("getMP4Duration error:", e);
-    return null;
-  }
-}
+
 
 // 고유 8자 코드 생성
 async function generateUniqueCode(env, length=8) {
@@ -1237,15 +1226,20 @@ function renderHTML(mediaTags, host) {
   <script>
     // 이미지 뷰어 모달 JavaScript 포함
     class ImageViewer {
-      constructor() {
-        this.scale = 1;
-        this.rotation = 0;
-        this.isDragging = false;
-        this.startX = 0;
-        this.startY = 0;
-        this.translateX = 0;
-        this.translateY = 0;
-      }
+             constructor() {
+         this.scale = 1;
+         this.rotation = 0;
+         this.isDragging = false;
+         this.startX = 0;
+         this.startY = 0;
+         this.translateX = 0;
+         this.translateY = 0;
+         
+         // 터치 지원 변수들
+         this.isPinching = false;
+         this.lastDistance = 0;
+         this.touches = [];
+       }
       
       init() {
         const modal = document.getElementById('imageViewerModal');
@@ -1293,23 +1287,62 @@ function renderHTML(mediaTags, host) {
         // 터치 이벤트
         img.addEventListener('touchstart', (e) => {
           e.preventDefault();
-          this.startDrag(e.touches[0]);
-        });
-        document.addEventListener('touchmove', (e) => {
-          if (this.isDragging) {
-            e.preventDefault();
-            this.drag(e.touches[0]);
+          this.touches = Array.from(e.touches);
+          
+          if (e.touches.length === 1) {
+            // 단일 터치: 드래그 시작
+            this.startDrag(e.touches[0]);
+          } else if (e.touches.length === 2) {
+            // 핀치 줌 시작
+            this.isPinching = true;
+            this.isDragging = false;
+            this.lastDistance = this.getDistance(e.touches[0], e.touches[1]);
           }
         });
-        document.addEventListener('touchend', () => this.endDrag());
         
-                 // 마우스 휠 줌 (마우스 위치 중심)
+        document.addEventListener('touchmove', (e) => {
+          e.preventDefault();
+          
+          if (e.touches.length === 1 && this.isDragging && !this.isPinching) {
+            // 단일 터치 드래그
+            this.drag(e.touches[0]);
+          } else if (e.touches.length === 2 && this.isPinching) {
+            // 핀치 줌
+            const currentDistance = this.getDistance(e.touches[0], e.touches[1]);
+            const scale = currentDistance / this.lastDistance;
+            
+            if (Math.abs(scale - 1) > 0.01) { // 너무 작은 변화는 무시
+              const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+              const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+              const rect = img.getBoundingClientRect();
+              const pointX = centerX - rect.left - rect.width / 2;
+              const pointY = centerY - rect.top - rect.height / 2;
+              
+              this.zoomAtPoint(scale, pointX, pointY);
+              this.lastDistance = currentDistance;
+            }
+          }
+        });
+        
+        document.addEventListener('touchend', (e) => {
+          if (e.touches.length === 0) {
+            this.endDrag();
+            this.isPinching = false;
+          } else if (e.touches.length === 1) {
+            this.isPinching = false;
+            if (!this.isDragging) {
+              this.startDrag(e.touches[0]);
+            }
+          }
+        });
+        
+                          // 마우스 휠 줌 (마우스 위치 중심)
          img.addEventListener('wheel', (e) => {
            e.preventDefault();
            const rect = img.getBoundingClientRect();
-           // 이미지 중심에서 마우스까지의 상대적 위치
-           const mouseX = (e.clientX - rect.left - rect.width / 2) / this.scale;
-           const mouseY = (e.clientY - rect.top - rect.height / 2) / this.scale;
+           // 이미지 중심에서 마우스까지의 픽셀 거리
+           const mouseX = e.clientX - rect.left - rect.width / 2;
+           const mouseY = e.clientY - rect.top - rect.height / 2;
            
            if (e.deltaY < 0) {
              this.zoomAtPoint(1.2, mouseX, mouseY);
@@ -1372,15 +1405,13 @@ function renderHTML(mediaTags, host) {
          
          if (oldScale === newScale) return; // 스케일이 변하지 않으면 리턴
          
-         // 마우스 위치를 이미지 좌표계로 변환
-         const scaleRatio = newScale / oldScale;
-         
-         // 현재 translate를 고려한 마우스 위치에서 확대/축소
-         this.translateX = this.translateX + pointX * (1 - scaleRatio);
-         this.translateY = this.translateY + pointY * (1 - scaleRatio);
+         // 확대/축소 시 마우스 포인터 위치 고정
+         const scaleDiff = newScale - oldScale;
+         this.translateX -= pointX * scaleDiff;
+         this.translateY -= pointY * scaleDiff;
          this.scale = newScale;
          
-         this.updateTransform();
+         this.updateTransform(); // 확대시 애니메이션 없음
        }
       
               rotateLeft() {
@@ -1415,9 +1446,15 @@ function renderHTML(mediaTags, host) {
         this.updateTransform();
       }
       
-      endDrag() {
-        this.isDragging = false;
-      }
+              endDrag() {
+          this.isDragging = false;
+        }
+        
+        getDistance(touch1, touch2) {
+          const dx = touch1.clientX - touch2.clientX;
+          const dy = touch1.clientY - touch2.clientY;
+          return Math.sqrt(dx * dx + dy * dy);
+        }
     }
     
     const imageViewer = new ImageViewer();
@@ -1760,84 +1797,4 @@ else:
 </html>`;
 }
 
-// 대체 비디오 검열 함수 (해상도 변경 등으로 기본 검열이 실패한 경우)
-async function performAlternativeCensorship(file, env) {
-  try {
-    console.log('대체 검열 방식 실행 중...');
-    
-    // 1. 파일 크기 검사 (너무 작거나 큰 파일 차단)
-    const fileSizeMB = file.size / (1024 * 1024);
-    if (fileSizeMB > 500) { // 500MB 초과
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: '파일 크기가 너무 큽니다. (최대 500MB)'
-        }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
-    }
-    
-    // 2. 파일명 검사 (의심스러운 키워드 체크)
-    const suspiciousKeywords = [
-      'porn', 'sex', 'nude', 'naked', 'xxx', 'adult', 'nsfw',
-      '포르노', '야동', '섹스', '누드', '19금', '성인', '음란'
-    ];
-    
-    const fileName = file.name?.toLowerCase() || '';
-    const hasSuspiciousName = suspiciousKeywords.some(keyword => 
-      fileName.includes(keyword.toLowerCase())
-    );
-    
-    if (hasSuspiciousName) {
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: '부적절한 파일명이 감지되었습니다.'
-        }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
-    }
-    
-    // 3. 파일 타입 재검증
-    if (!file.type.startsWith('video/')) {
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: '지원하지 않는 파일 형식입니다.'
-        }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
-    }
-    
-    // 4. 비디오 길이 검사 (너무 짧은 비디오는 의심스러울 수 있음)
-    if (file.type === 'video/mp4') {
-      const duration = await getMP4Duration(file);
-      if (duration && duration < 1) { // 1초 미만
-        return { ok: false, response: new Response(JSON.stringify({
-            success: false, error: '비디오 길이가 너무 짧습니다.'
-          }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
-      }
-    }
-    
-    // 5. 기본적인 바이트 패턴 검사 (단순한 악성 패턴 체크)
-    const buffer = await file.arrayBuffer();
-    const view = new Uint8Array(buffer);
-    
-    // 파일 시작 부분의 매직 넘버 검증
-    const validVideoHeaders = {
-      'video/mp4': [0x00, 0x00, 0x00, null], // MP4 파일 시그니처
-      'video/webm': [0x1A, 0x45, 0xDF, 0xA3], // WebM 파일 시그니처
-      'video/ogg': [0x4F, 0x67, 0x67, 0x53]  // OGG 파일 시그니처
-    };
-    
-    const expectedHeader = validVideoHeaders[file.type];
-    if (expectedHeader) {
-      const isValidHeader = expectedHeader.every((byte, index) => 
-        byte === null || view[index] === byte
-      );
-      
-      if (!isValidHeader) {
-        return { ok: false, response: new Response(JSON.stringify({
-            success: false, error: '손상된 비디오 파일입니다.'
-          }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
-      }
-    }
-    
-    console.log('대체 검열 완료: 통과');
-    return { ok: true };
-    
-  } catch (error) {
-    console.log('대체 검열 중 오류:', error);
-    return { ok: false, response: new Response(JSON.stringify({
-        success: false, error: '비디오 검열 중 오류가 발생했습니다.'
-      }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
-  }
-}
+
