@@ -442,34 +442,24 @@ async function handleImageCensorship(file, env) {
       contents: [{
         parts: [
           { text:
-            "Analyze this image for inappropriate content with extreme precision. Look very carefully for ALL forms of inappropriate content including subtle attempts to bypass detection. " +
-            "SPECIFICALLY LOOK FOR:\n" +
-            "- Offensive hand gestures (middle finger, obscene gestures, rude signs)\n" +
-            "- ANY visible text with profanity, slurs, or offensive language in ANY language\n" +
-            "- Partially censored/blocked profanity (f*ck, sh*t, b***h, 시*발, 개*끼, etc.)\n" +
-            "- Leetspeak profanity (f4ck, sh1t, b1tch, 5h1t, etc.)\n" +
-            "- Symbol-replaced profanity (@$$, $h!t, fu©k, 시ㅂ발, 개ㅅㄲ, etc.)\n" +
-            "- Deliberately misspelled profanity\n" +
-            "- Korean profanity in any form (시발, 개새끼, 병신, 좆, 씨발, etc.)\n" +
-            "- Text written backwards, upside down, or creatively hidden\n" +
-            "- Offensive symbols, hate symbols, discriminatory imagery\n" +
-            "- Any artistic filters, noise, blur, or partial covering used to hide inappropriate content\n\n" +
+            "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+            "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
+            "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
             "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
             "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
             "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
             "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
             "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
             "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-            "6. Hate speech/Offensive language (ANY profanity, slurs, hate symbols, discriminatory text, even if partially hidden): true/false\n" +
-            "7. Offensive gestures (middle finger, obscene hand signs, rude gestures): true/false\n" +
-            "8. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-            "9. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-            "10. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-            "11. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-            "12. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-            "13. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-            "Be extremely thorough in detecting hidden or partially obscured inappropriate content. " +
-            "However, normal everyday content, genuine artistic expression, and educational material should be marked as false."
+            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
+            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+            "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
            },
           { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
@@ -496,7 +486,7 @@ async function handleImageCensorship(file, env) {
     const bad = isInappropriateContent(analysis.text);
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
-    if (bad.isInappropriate && bad.reasons.length >= 5) {
+    if (bad.isInappropriate && bad.reasons.length >= 4) {
       console.log(`[과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
       
       // 보수적 재검토 요청
@@ -648,36 +638,25 @@ async function handleVideoCensorship(file, env) {
       contents: [{
         parts: [
           { text:
-              "Analyze this video for inappropriate content frame by frame with extreme precision. Look very carefully throughout the ENTIRE video for ALL forms of inappropriate content including subtle attempts to bypass detection. " +
-              "SPECIFICALLY LOOK FOR:\n" +
-              "- Offensive hand gestures (middle finger, obscene gestures, rude signs) at ANY point in the video\n" +
-              "- ANY visible text or spoken audio with profanity, slurs, or offensive language in ANY language\n" +
-              "- Partially censored/blocked profanity in text or audio (f*ck, sh*t, b***h, 시*발, 개*끼, etc.)\n" +
-              "- Leetspeak profanity (f4ck, sh1t, b1tch, 5h1t, etc.)\n" +
-              "- Symbol-replaced profanity (@$$, $h!t, fu©k, 시ㅂ발, 개ㅅㄲ, etc.)\n" +
-              "- Deliberately misspelled profanity\n" +
-              "- Korean profanity in any form (시발, 개새끼, 병신, 좆, 씨발, etc.)\n" +
-              "- Text written backwards, upside down, or creatively hidden\n" +
-              "- Offensive symbols, hate symbols, discriminatory imagery\n" +
-              "- Quick flashes of inappropriate content, brief appearances\n" +
-              "- Any artistic filters, noise, blur, or partial covering used to hide inappropriate content\n" +
-              "- Content that appears only for split seconds\n\n" +
+              "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
+              "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
+              "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+              "Consider the entire video duration and any content that appears briefly. " +
               "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
               "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
               "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
               "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
               "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
               "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-              "6. Hate speech/Offensive language (ANY profanity, slurs, hate symbols, discriminatory text or audio, even if partially hidden): true/false\n" +
-              "7. Offensive gestures (middle finger, obscene hand signs, rude gestures): true/false\n" +
-              "8. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-              "9. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-              "10. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-              "11. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-              "12. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-              "13. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-              "Be extremely thorough in detecting hidden, brief, or partially obscured inappropriate content throughout the entire video. " +
-              "However, normal everyday content, genuine artistic expression, educational material, and legitimate gaming content should be marked as false."
+              "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
+              "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+              "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+              "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+              "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+              "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+              "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+              "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+              "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
              },
           { file_data: { mime_type: file.type, file_uri: fileUri } }
         ]
@@ -698,9 +677,9 @@ async function handleVideoCensorship(file, env) {
     }
     const bad = isInappropriateContent(analysis.text);
     
-         // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
-     if (bad.isInappropriate && bad.reasons.length >= 5) {
-       console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
+    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
+    if (bad.isInappropriate && bad.reasons.length >= 4) {
+      console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
       
       // 보수적 재검토 요청
       const reReviewBody = {
@@ -833,13 +812,12 @@ function isInappropriateContent(responseText) {
     4: '극단적 폭력/고어 콘텐츠',
     5: '약물/알코올 남용 콘텐츠',
     6: '혐오 발언/욕설',
-    7: '음란한 손가락 욕/제스처',
-    8: '괴롭힘/따돌림 콘텐츠',
-    9: '자해/자살 관련 콘텐츠',
-    10: '불법 활동',
-    11: '스팸/사기 콘텐츠',
-    12: '아동 착취',
-    13: '극단주의 콘텐츠'
+    7: '괴롭힘/따돌림 콘텐츠',
+    8: '자해/자살 관련 콘텐츠',
+    9: '불법 활동',
+    10: '스팸/사기 콘텐츠',
+    11: '아동 착취',
+    12: '극단주의 콘텐츠'
   };
 
   // 결과 저장소
@@ -848,27 +826,27 @@ function isInappropriateContent(responseText) {
   // 응답을 줄별로 순회하며 다양한 패턴 파싱
   responseText.split(/\r?\n/).forEach((line, lineIndex) => {
     // 패턴 1: "숫자. true/false" 형태
-    let m = line.match(/^\s*([1-9]|1[0-3])\.\s*(true|false)\b/i);
+    let m = line.match(/^\s*([1-9]|1[0-2])\.\s*(true|false)\b/i);
     if (!m) {
       // 패턴 2: "숫자: true/false" 형태
-      m = line.match(/^\s*([1-9]|1[0-3]):\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|1[0-2]):\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 3: "숫자 - true/false" 형태
-      m = line.match(/^\s*([1-9]|1[0-3])\s*[-–]\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|1[0-2])\s*[-–]\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 4: "숫자) true/false" 형태
-      m = line.match(/^\s*([1-9]|1[0-3])\)\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|1[0-2])\)\s*(true|false)\b/i);
     }
     if (!m) {
-      // 패턴 5: 단순히 "true" 또는 "false"만 있는 경우 (순서대로 1-13 매핑)
+      // 패턴 5: 단순히 "true" 또는 "false"만 있는 경우 (순서대로 1-12 매핑)
       const trueMatch = line.match(/^\s*(true|false)\b/i);
       if (trueMatch) {
         // 실제 내용이 있는 줄들만 카운트
         const contentLines = responseText.split(/\r?\n/).filter(l => l.trim().match(/^\s*(true|false)\b/i));
         const contentLineIndex = contentLines.indexOf(line.trim());
-        if (contentLineIndex >= 0 && contentLineIndex < 13) {
+        if (contentLineIndex >= 0 && contentLineIndex < 12) {
           m = [null, (contentLineIndex + 1).toString(), trueMatch[1]];
         }
       }
