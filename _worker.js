@@ -422,20 +422,71 @@ async function handleImageCensorship(file, env) {
       };
     }
 
+    // 검열용 이미지 리사이징 (항상 수행)
     let imageBase64 = base64;
-    if (buf.byteLength > 3 * 1024 * 1024) {
-      try {
-        const dataUrl = `data:${file.type};base64,${base64}`;
-        const resizedResp = await fetch(new Request(dataUrl, {
-          cf: { image: { width: 800, height: 800, fit: "inside" } }
-        }));
-        if (resizedResp.ok) {
-          const resizedBuf = await resizedResp.blob().then(b => b.arrayBuffer());
-          imageBase64 = arrayBufferToBase64(resizedBuf);
+    try {
+      const dataUrl = `data:${file.type};base64,${base64}`;
+      
+      // 단계 1: 원본 이미지 크기 정보 추출을 위한 최소 리사이징
+      const infoResp = await fetch(new Request(dataUrl, {
+        cf: { image: { width: 1, height: 1, fit: "inside", metadata: "keep" } }
+      }));
+      
+      let resizeWidth = 600, resizeHeight = 600;
+      
+      if (infoResp.ok) {
+        // 응답 헤더에서 원본 이미지 크기 정보 추출 시도
+        const originalWidth = parseInt(infoResp.headers.get('cf-image-width')) || 
+                            parseInt(infoResp.headers.get('x-original-width')) || 800;
+        const originalHeight = parseInt(infoResp.headers.get('cf-image-height')) || 
+                             parseInt(infoResp.headers.get('x-original-height')) || 600;
+        
+        // 비율 계산
+        const aspectRatio = originalWidth / originalHeight;
+        
+        if (aspectRatio <= 6 && aspectRatio >= 1/6) {
+          // 일반적인 비율: 가로/세로 최대 600px
+          if (originalWidth > originalHeight) {
+            resizeWidth = Math.min(600, originalWidth);
+            resizeHeight = Math.round(resizeWidth / aspectRatio);
+          } else {
+            resizeHeight = Math.min(600, originalHeight);
+            resizeWidth = Math.round(resizeHeight * aspectRatio);
+          }
+        } else if (aspectRatio > 6) {
+          // 가로가 세로의 6배 초과: 세로 최대 600px
+          resizeHeight = Math.min(600, originalHeight);
+          resizeWidth = Math.round(resizeHeight * aspectRatio);
+        } else {
+          // 세로가 가로의 6배 초과: 가로 최대 600px
+          resizeWidth = Math.min(600, originalWidth);
+          resizeHeight = Math.round(resizeWidth / aspectRatio);
         }
-      } catch (e) {
-        console.log("이미지 리사이징 실패:", e);
+        
+        console.log(`[검열용 리사이징] 원본 크기: ${originalWidth}x${originalHeight}, 비율: ${aspectRatio.toFixed(2)}`);
       }
+      
+      // 실제 리사이징 수행
+      const resizedResp = await fetch(new Request(dataUrl, {
+        cf: { 
+          image: { 
+            width: resizeWidth, 
+            height: resizeHeight, 
+            fit: "inside", 
+            quality: 85 
+          } 
+        }
+      }));
+      
+      if (resizedResp.ok) {
+        const resizedBuf = await resizedResp.blob().then(b => b.arrayBuffer());
+        imageBase64 = arrayBufferToBase64(resizedBuf);
+        console.log(`[검열용 리사이징] 최종 크기: ${resizeWidth}x${resizeHeight} 적용`);
+      } else {
+        console.log("검열용 이미지 리사이징 실패, 원본 사용");
+      }
+    } catch (e) {
+      console.log("검열용 이미지 리사이징 실패:", e);
     }
 
     const requestBody = {
