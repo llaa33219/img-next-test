@@ -422,71 +422,43 @@ async function handleImageCensorship(file, env) {
       };
     }
 
-    // 검열용 이미지 리사이징 (항상 수행)
     let imageBase64 = base64;
+    
+    // 이미지 크기 정보 획득 및 리사이징
     try {
-      const dataUrl = `data:${file.type};base64,${base64}`;
-      
-      // 단계 1: 원본 이미지 크기 정보 추출을 위한 최소 리사이징
-      const infoResp = await fetch(new Request(dataUrl, {
-        cf: { image: { width: 1, height: 1, fit: "inside", metadata: "keep" } }
-      }));
-      
-      let resizeWidth = 600, resizeHeight = 600;
-      
-      if (infoResp.ok) {
-        // 응답 헤더에서 원본 이미지 크기 정보 추출 시도
-        const originalWidth = parseInt(infoResp.headers.get('cf-image-width')) || 
-                            parseInt(infoResp.headers.get('x-original-width')) || 800;
-        const originalHeight = parseInt(infoResp.headers.get('cf-image-height')) || 
-                             parseInt(infoResp.headers.get('x-original-height')) || 600;
+      const imageDimensions = await getImageDimensions(buf, file.type);
+      if (imageDimensions) {
+        const { width, height } = imageDimensions;
+        console.log(`[이미지 크기] ${width}x${height}`);
         
-        // 비율 계산
-        const aspectRatio = originalWidth / originalHeight;
-        
-        if (aspectRatio <= 6 && aspectRatio >= 1/6) {
-          // 일반적인 비율: 가로/세로 최대 600px
-          if (originalWidth > originalHeight) {
-            resizeWidth = Math.min(600, originalWidth);
-            resizeHeight = Math.round(resizeWidth / aspectRatio);
-          } else {
-            resizeHeight = Math.min(600, originalHeight);
-            resizeWidth = Math.round(resizeHeight * aspectRatio);
+        // 리사이징 조건 확인 및 적용
+        const resizeParams = calculateResizeParams(width, height);
+        if (resizeParams.needsResize) {
+          console.log(`[리사이징 필요] ${width}x${height} -> ${resizeParams.newWidth}x${resizeParams.newHeight}`);
+          
+          const dataUrl = `data:${file.type};base64,${base64}`;
+          const resizedResp = await fetch(new Request(dataUrl, {
+            cf: { 
+              image: { 
+                width: resizeParams.newWidth, 
+                height: resizeParams.newHeight, 
+                fit: "scale-down" 
+              } 
+            }
+          }));
+          
+          if (resizedResp.ok) {
+            const resizedBuf = await resizedResp.blob().then(b => b.arrayBuffer());
+            imageBase64 = arrayBufferToBase64(resizedBuf);
+            console.log(`[리사이징 완료] 검열용 이미지 크기 조정됨`);
           }
-        } else if (aspectRatio > 6) {
-          // 가로가 세로의 6배 초과: 세로 최대 600px
-          resizeHeight = Math.min(600, originalHeight);
-          resizeWidth = Math.round(resizeHeight * aspectRatio);
         } else {
-          // 세로가 가로의 6배 초과: 가로 최대 600px
-          resizeWidth = Math.min(600, originalWidth);
-          resizeHeight = Math.round(resizeWidth / aspectRatio);
+          console.log(`[리사이징 불필요] 원본 크기 유지`);
         }
-        
-        console.log(`[검열용 리사이징] 원본 크기: ${originalWidth}x${originalHeight}, 비율: ${aspectRatio.toFixed(2)}`);
-      }
-      
-      // 실제 리사이징 수행
-      const resizedResp = await fetch(new Request(dataUrl, {
-        cf: { 
-          image: { 
-            width: resizeWidth, 
-            height: resizeHeight, 
-            fit: "inside", 
-            quality: 85 
-          } 
-        }
-      }));
-      
-      if (resizedResp.ok) {
-        const resizedBuf = await resizedResp.blob().then(b => b.arrayBuffer());
-        imageBase64 = arrayBufferToBase64(resizedBuf);
-        console.log(`[검열용 리사이징] 최종 크기: ${resizeWidth}x${resizeHeight} 적용`);
-      } else {
-        console.log("검열용 이미지 리사이징 실패, 원본 사용");
       }
     } catch (e) {
-      console.log("검열용 이미지 리사이징 실패:", e);
+      console.log("이미지 크기 확인 또는 리사이징 실패:", e);
+      // 실패 시 원본 사용 계속
     }
 
     const requestBody = {
@@ -952,6 +924,170 @@ function arrayBufferToBase64(buffer) {
   let bin='', bytes=new Uint8Array(buffer);
   for (let b of bytes) bin+=String.fromCharCode(b);
   return btoa(bin);
+}
+
+// 이미지 크기 정보 추출 함수
+async function getImageDimensions(buffer, mimeType) {
+  const uint8Array = new Uint8Array(buffer);
+  
+  try {
+    switch (mimeType) {
+      case 'image/jpeg':
+        return getJPEGDimensions(uint8Array);
+      case 'image/png':
+        return getPNGDimensions(uint8Array);
+      case 'image/gif':
+        return getGIFDimensions(uint8Array);
+      case 'image/webp':
+        return getWebPDimensions(uint8Array);
+      default:
+        console.log(`지원하지 않는 이미지 형식: ${mimeType}`);
+        return null;
+    }
+  } catch (e) {
+    console.log(`이미지 크기 추출 실패 (${mimeType}):`, e);
+    return null;
+  }
+}
+
+// JPEG 크기 추출
+function getJPEGDimensions(uint8Array) {
+  let i = 0;
+  if (uint8Array[i] !== 0xFF || uint8Array[i + 1] !== 0xD8) {
+    throw new Error('Invalid JPEG header');
+  }
+  i += 2;
+  
+  while (i < uint8Array.length) {
+    if (uint8Array[i] !== 0xFF) {
+      throw new Error('Invalid JPEG marker');
+    }
+    
+    const marker = uint8Array[i + 1];
+    if (marker === 0xC0 || marker === 0xC2) { // SOF0 or SOF2
+      const height = (uint8Array[i + 5] << 8) | uint8Array[i + 6];
+      const width = (uint8Array[i + 7] << 8) | uint8Array[i + 8];
+      return { width, height };
+    }
+    
+    i += 2;
+    const segmentLength = (uint8Array[i] << 8) | uint8Array[i + 1];
+    i += segmentLength;
+  }
+  
+  throw new Error('JPEG dimensions not found');
+}
+
+// PNG 크기 추출
+function getPNGDimensions(uint8Array) {
+  // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+  if (uint8Array[0] !== 0x89 || uint8Array[1] !== 0x50 || uint8Array[2] !== 0x4E || uint8Array[3] !== 0x47) {
+    throw new Error('Invalid PNG header');
+  }
+  
+  // IHDR chunk starts at byte 8
+  const width = (uint8Array[16] << 24) | (uint8Array[17] << 16) | (uint8Array[18] << 8) | uint8Array[19];
+  const height = (uint8Array[20] << 24) | (uint8Array[21] << 16) | (uint8Array[22] << 8) | uint8Array[23];
+  
+  return { width, height };
+}
+
+// GIF 크기 추출
+function getGIFDimensions(uint8Array) {
+  // GIF signature: "GIF87a" or "GIF89a"
+  if (uint8Array[0] !== 0x47 || uint8Array[1] !== 0x49 || uint8Array[2] !== 0x46) {
+    throw new Error('Invalid GIF header');
+  }
+  
+  // Width and height are at bytes 6-9 (little endian)
+  const width = uint8Array[6] | (uint8Array[7] << 8);
+  const height = uint8Array[8] | (uint8Array[9] << 8);
+  
+  return { width, height };
+}
+
+// WebP 크기 추출
+function getWebPDimensions(uint8Array) {
+  // WebP signature: "RIFF" + file size + "WEBP"
+  if (uint8Array[0] !== 0x52 || uint8Array[1] !== 0x49 || uint8Array[2] !== 0x46 || uint8Array[3] !== 0x46) {
+    throw new Error('Invalid WebP header');
+  }
+  
+  if (uint8Array[8] !== 0x57 || uint8Array[9] !== 0x45 || uint8Array[10] !== 0x42 || uint8Array[11] !== 0x50) {
+    throw new Error('Invalid WebP header');
+  }
+  
+  // VP8 format
+  if (uint8Array[12] === 0x56 && uint8Array[13] === 0x50 && uint8Array[14] === 0x38 && uint8Array[15] === 0x20) {
+    const width = ((uint8Array[26] | (uint8Array[27] << 8)) & 0x3fff) + 1;
+    const height = ((uint8Array[28] | (uint8Array[29] << 8)) & 0x3fff) + 1;
+    return { width, height };
+  }
+  
+  // VP8L format
+  if (uint8Array[12] === 0x56 && uint8Array[13] === 0x50 && uint8Array[14] === 0x38 && uint8Array[15] === 0x4C) {
+    const bits = uint8Array[21] | (uint8Array[22] << 8) | (uint8Array[23] << 16) | (uint8Array[24] << 24);
+    const width = (bits & 0x3FFF) + 1;
+    const height = ((bits >> 14) & 0x3FFF) + 1;
+    return { width, height };
+  }
+  
+  throw new Error('Unsupported WebP format');
+}
+
+// 리사이징 파라미터 계산 함수
+function calculateResizeParams(width, height) {
+  const MAX_SIZE = 600;
+  const ASPECT_RATIO_THRESHOLD = 6; // 6배 초과/이하 기준
+  
+  // 비율 계산
+  const widthToHeightRatio = width / height;
+  const heightToWidthRatio = height / width;
+  
+  let newWidth = width;
+  let newHeight = height;
+  let needsResize = false;
+  
+  // 조건 1: 가로가 세로의 6배 이하 또는 세로가 가로의 6배 이하 (일반적인 비율)
+  if (widthToHeightRatio <= ASPECT_RATIO_THRESHOLD && heightToWidthRatio <= ASPECT_RATIO_THRESHOLD) {
+    // 가로/세로 최대 600px로 제한
+    if (width > MAX_SIZE || height > MAX_SIZE) {
+      const scale = Math.min(MAX_SIZE / width, MAX_SIZE / height);
+      newWidth = Math.round(width * scale);
+      newHeight = Math.round(height * scale);
+      needsResize = true;
+    }
+  }
+  // 조건 2: 극단적인 비율의 이미지들
+  else {
+    // 가로가 세로의 6배 초과 (가로로 긴 이미지)
+    if (widthToHeightRatio > ASPECT_RATIO_THRESHOLD) {
+      if (height > MAX_SIZE) {
+        const scale = MAX_SIZE / height;
+        newWidth = Math.round(width * scale);
+        newHeight = MAX_SIZE;
+        needsResize = true;
+      }
+    }
+    // 세로가 가로의 6배 초과 (세로로 긴 이미지)
+    else if (heightToWidthRatio > ASPECT_RATIO_THRESHOLD) {
+      if (width > MAX_SIZE) {
+        const scale = MAX_SIZE / width;
+        newWidth = MAX_SIZE;
+        newHeight = Math.round(height * scale);
+        needsResize = true;
+      }
+    }
+  }
+  
+  return {
+    needsResize,
+    newWidth,
+    newHeight,
+    originalWidth: width,
+    originalHeight: height,
+    aspectRatio: widthToHeightRatio
+  };
 }
 
 // 최종 HTML 렌더
