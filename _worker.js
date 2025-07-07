@@ -423,8 +423,12 @@ async function handleImageCensorship(file, env) {
     // 이미지를 임시 버킷에 업로드
     const imageUrl = await uploadImageToTempBucket(file, env);
     if (!imageUrl) {
+      const errorMsg = !env.TEMP_BUCKET ? 
+        'TEMP_BUCKET이 바인딩되지 않았습니다. Cloudflare Workers 설정에서 TEMP_BUCKET 바인딩을 확인해주세요.' :
+        '이미지 임시 업로드에 실패했습니다. 버킷 설정을 확인해주세요.';
+      
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: '이미지 임시 업로드에 실패했습니다.'
+          success: false, error: errorMsg
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
@@ -549,8 +553,12 @@ async function handleVideoCensorship(file, env) {
     // 동영상을 임시 버킷에 업로드
     const videoUrl = await uploadVideoToTempBucket(file, env);
     if (!videoUrl) {
+      const errorMsg = !env.TEMP_BUCKET ? 
+        'TEMP_BUCKET이 바인딩되지 않았습니다. Cloudflare Workers 설정에서 TEMP_BUCKET 바인딩을 확인해주세요.' :
+        '동영상 임시 업로드에 실패했습니다. 버킷 설정을 확인해주세요.';
+      
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: '동영상 임시 업로드에 실패했습니다.'
+          success: false, error: errorMsg
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
@@ -734,6 +742,12 @@ async function callQwenAPI(apiKey, requestBody) {
 // 이미지를 임시 버킷에 업로드하고 URL 반환
 async function uploadImageToTempBucket(file, env) {
   try {
+    // TEMP_BUCKET 바인딩 확인
+    if (!env.TEMP_BUCKET) {
+      console.log('TEMP_BUCKET 바인딩이 설정되지 않았습니다.');
+      return null;
+    }
+
     const tempKey = `temp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     const buffer = await file.arrayBuffer();
     
@@ -742,10 +756,12 @@ async function uploadImageToTempBucket(file, env) {
     });
     
     // 임시 버킷의 공개 URL 생성
-    // Cloudflare R2의 경우 Custom Domain이나 R2 Public URL을 사용
+    // TEMP_BUCKET_URL이 설정되지 않은 경우 기본값 사용
     const tempUrl = env.TEMP_BUCKET_URL ? 
       `${env.TEMP_BUCKET_URL}/${tempKey}` : 
-      `https://temp.${new URL(self.location).hostname}/${tempKey}`;
+      `https://temp-bucket.example.com/${tempKey}`;
+    
+    console.log(`임시 이미지 업로드 완료: ${tempKey}`);
     return tempUrl;
   } catch (e) {
     console.log('이미지 임시 업로드 오류:', e);
@@ -756,6 +772,12 @@ async function uploadImageToTempBucket(file, env) {
 // 동영상을 임시 버킷에 업로드하고 URL 반환
 async function uploadVideoToTempBucket(file, env) {
   try {
+    // TEMP_BUCKET 바인딩 확인
+    if (!env.TEMP_BUCKET) {
+      console.log('TEMP_BUCKET 바인딩이 설정되지 않았습니다.');
+      return null;
+    }
+
     const tempKey = `temp_video_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     const buffer = await file.arrayBuffer();
     
@@ -764,10 +786,12 @@ async function uploadVideoToTempBucket(file, env) {
     });
     
     // 임시 버킷의 공개 URL 생성
-    // Cloudflare R2의 경우 Custom Domain이나 R2 Public URL을 사용
+    // TEMP_BUCKET_URL이 설정되지 않은 경우 기본값 사용
     const tempUrl = env.TEMP_BUCKET_URL ? 
       `${env.TEMP_BUCKET_URL}/${tempKey}` : 
-      `https://temp.${new URL(self.location).hostname}/${tempKey}`;
+      `https://temp-bucket.example.com/${tempKey}`;
+    
+    console.log(`임시 동영상 업로드 완료: ${tempKey}`);
     return tempUrl;
   } catch (e) {
     console.log('동영상 임시 업로드 오류:', e);
