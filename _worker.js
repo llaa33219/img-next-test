@@ -198,13 +198,10 @@ export default {
             finalResp = await handleUpload(request, env);
             requestsInProgress[cfReqId].resolve(finalResp);
           } catch (err) {
-            console.log("handleUpload error:", err);
-            const failResp = new Response(
-              JSON.stringify({ success: false, error: err.message }),
-              { status: 500, headers: { 'Content-Type': 'application/json' } }
-            );
-            requestsInProgress[cfReqId].reject(failResp);
-            finalResp = failResp;
+            requestsInProgress[cfReqId].reject(err);
+            finalResp = new Response(JSON.stringify({
+              success: false, error: `업로드 처리 중 오류 발생: ${err.message}`
+            }), { status: 500, headers: { 'Content-Type': 'application/json' } });
           }
           return isExternalRequest ? addCorsHeaders(finalResp) : finalResp;
         }
@@ -214,210 +211,132 @@ export default {
       }
     }
 
-    // 2) [POST] /api/upload => API 전용 업로드 엔드포인트 (외부용)
-    else if (request.method === 'POST' && path === '/api/upload') {
-      // 클라이언트 IP 가져오기
-      const clientIP = request.headers.get('CF-Connecting-IP') || 
-                      request.headers.get('X-Forwarded-For') || 
-                      request.headers.get('X-Real-IP') || 
-                      'unknown';
-      
-      // 레이트 리미팅 검사
-      const rateLimitResult = checkRateLimit(clientIP);
-      if (rateLimitResult.blocked) {
-        console.log(`[Rate Limit] API IP ${clientIP} 차단됨: ${rateLimitResult.reason}`);
-        const response = new Response(JSON.stringify({
-          success: false,
-          error: `보안상 업로드가 제한되었습니다. ${rateLimitResult.reason}. ${rateLimitResult.remainingTime}초 후 다시 시도하세요.`,
-          rateLimited: true,
-          remainingTime: rateLimitResult.remainingTime
-        }), {
-          status: 429,
-          headers: { 'Content-Type': 'application/json' }
-        });
-        return addCorsHeaders(response);
-      }
-      
-      const response = await handleUpload(request, env);
-      return addCorsHeaders(response);
-    }
-
-    // 3) [GET] /api => API 문서 제공
-    else if (request.method === 'GET' && path === '/api') {
-      return new Response(renderApiDocs(url.host), {
-        headers: { 'Content-Type': 'text/html; charset=UTF-8' }
+    // 2) [GET] / => HTML 페이지 반환 (업로드 인터페이스)
+    if (request.method === 'GET' && path === '') {
+      return new Response(renderHTML('', url.host), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
       });
     }
 
-    // 4) [GET] /{코드 또는 커스텀 이름} => R2 파일 or HTML
-    else if (request.method === 'GET' && url.pathname.length > 1) {
-      if (url.pathname.includes('.')) {
-        return env.ASSETS.fetch(request);
-      }
-      if (url.pathname.indexOf(',') !== -1) {
-        const codes = url.pathname.slice(1).split(',').map(decodeURIComponent);
-        if (url.searchParams.get('raw') === '1') {
-          const object = await env.IMAGES.get(codes[0]);
-          if (!object) return new Response('Not Found', { status: 404 });
-          const headers = new Headers();
-          headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
-          return new Response(object.body, { headers });
-        }
-        const objects = await Promise.all(codes.map(async code => ({
-          code,
-          object: await env.IMAGES.get(code)
-        })));
-        let mediaTags = "";
-        for (const { code, object } of objects) {
-          if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTags += `<video src="https://${url.host}/${code}?raw=1"></video>\n`;
-          } else {
-            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media">\n`;
-          }
-        }
-        return new Response(renderHTML(mediaTags, url.host), {
-          headers: { "Content-Type": "text/html; charset=UTF-8" }
-        });
-      } else {
-        const key = decodeURIComponent(url.pathname.slice(1));
-        const object = await env.IMAGES.get(key);
-        if (!object) return new Response('Not Found', { status: 404 });
-        if (url.searchParams.get('raw') === '1') {
-          const headers = new Headers();
-          headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
-          return new Response(object.body, { headers });
-        } else {
-          let mediaTag = "";
-          if (object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTag = `<video src="https://${url.host}/${key}?raw=1"></video>\n`;
-          } else {
-            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media">\n`;
-          }
-          return new Response(renderHTML(mediaTag, url.host), {
-            headers: { 'Content-Type': 'text/html; charset=UTF-8' }
+    // 3) [GET] /:code => 업로드된 파일 조회
+    if (request.method === 'GET') {
+      const code = path.substring(1);
+      if (code && /^[a-zA-Z0-9]{8}$/.test(code)) {
+        const storedData = await env.IMAGES.get(code);
+        if (!storedData) {
+          return new Response(renderHTML('', url.host), {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' }
           });
         }
+        const { fileUrl, name, type } = JSON.parse(storedData);
+        let mediaTag;
+        if (type.startsWith('video/')) {
+          mediaTag = `<video controls><source src="${fileUrl}" type="${type}">동영상을 재생할 수 없습니다.</video>`;
+        } else {
+          mediaTag = `<img src="${fileUrl}" alt="${name}">`;
+        }
+        return new Response(renderHTML(mediaTag, url.host), {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
       }
     }
 
-    // 5) 그 외 => 기본 정적 에셋
-    return env.ASSETS.fetch(request);
+    // 4) [GET] /api/docs => API 문서
+    if (request.method === 'GET' && path === '/api/docs') {
+      return new Response(renderApiDocs(url.host), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+      });
+    }
+
+    // 404 처리
+    return new Response('Not Found', { status: 404 });
   }
 };
 
-// 메인 업로드 처리 함수
+// 실제 업로드 처리
 async function handleUpload(request, env) {
-  const formData = await request.formData();
-  const files = formData.getAll('file');
-  let customName = formData.get('customName');
-
-  if (!files || files.length === 0) {
-    return new Response(JSON.stringify({ success: false, error: '파일이 제공되지 않았습니다.' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  const allowedImageTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
-  const allowedVideoTypes = ["video/mp4", "video/webm", "video/ogg", "video/x-msvideo", "video/avi", "video/msvideo"];
-  for (const file of files) {
-    if (file.type.startsWith('image/')) {
-      if (!allowedImageTypes.includes(file.type)) {
-        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 이미지 형식입니다.' }), {
-          status: 400, headers: { 'Content-Type': 'application/json' }
-        });
-      }
-    } else if (file.type.startsWith('video/')) {
-      if (!allowedVideoTypes.includes(file.type)) {
-        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 동영상 형식입니다.' }), {
-          status: 400, headers: { 'Content-Type': 'application/json' }
-        });
-      }
-    } else {
-      return new Response(JSON.stringify({ success: false, error: '지원하지 않는 파일 형식입니다.' }), {
-        status: 400, headers: { 'Content-Type': 'application/json' } });
-    }
-  }
-
-  // 1) 검열
   try {
-    console.log(`[검열 시작] ${files.length}개 파일 검열 시작`);
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.type}, ${(file.size / 1024 / 1024).toFixed(2)}MB`);
-      
-      const r = file.type.startsWith('image/')
-        ? await handleImageCensorship(file, env)
-        : await handleVideoCensorship(file, env);
-        
-      if (!r.ok) {
-        console.log(`[검열 실패] ${i + 1}번째 파일에서 검열 실패`);
-        return r.response;
-      } else {
-        console.log(`[검열 통과] ${i + 1}번째 파일 검열 통과`);
-      }
-    }
-    console.log(`[검열 완료] 모든 파일(${files.length}개) 검열 통과`);
-  } catch (e) {
-    console.log("검열 과정에서 예상치 못한 오류 발생:", e);
-    return new Response(JSON.stringify({
-      success: false,
-      error: `검열 처리 중 오류: ${e.message}`
-    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  // 2) R2 업로드
-  let codes = [];
-  if (customName && files.length === 1) {
-    customName = customName.replace(/ /g, "_");
-    if (await env.IMAGES.get(customName)) {
+    const formData = await request.formData();
+    const file = formData.get('file');
+    if (!file) {
       return new Response(JSON.stringify({
-        success: false,
-        error: '이미 사용 중인 이름입니다. 다른 이름을 선택해주세요.'
+        success: false, error: '파일이 업로드되지 않았습니다.'
       }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
-    const buffer = await files[0].arrayBuffer();
-    await env.IMAGES.put(customName, buffer, {
-      httpMetadata: { contentType: files[0].type }
-    });
-    codes.push(customName);
-  } else {
-    for (const file of files) {
-      const code = await generateUniqueCode(env);
-      const buffer = await file.arrayBuffer();
-      await env.IMAGES.put(code, buffer, {
-        httpMetadata: { contentType: file.type }
-      });
-      codes.push(code);
+
+    console.log(`[업로드 시작] 파일명: ${file.name}, 크기: ${file.size}bytes, 타입: ${file.type}`);
+
+    // 타입 검증
+    const allowedTypes = {
+      'image/jpeg': true, 'image/jpg': true, 'image/png': true, 'image/gif': true,
+      'image/webp': true, 'image/bmp': true, 'image/svg+xml': true,
+      'video/mp4': true, 'video/webm': true, 'video/quicktime': true,
+      'video/x-msvideo': true, 'video/avi': true
+    };
+    
+    if (!allowedTypes[file.type]) {
+      return new Response(JSON.stringify({
+        success: false, error: '지원되지 않는 파일 형식입니다.'
+      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
+
+    // 크기 제한
+    const maxSize = file.type.startsWith('video/') ? 300 * 1024 * 1024 : 20 * 1024 * 1024;
+    if (file.size > maxSize) {
+      const limitStr = file.type.startsWith('video/') ? '300MB' : '20MB';
+      return new Response(JSON.stringify({
+        success: false, error: `파일 크기가 ${limitStr}를 초과합니다.`
+      }), { status: 413, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // 콘텐츠 검열
+    let censorResult;
+    if (file.type.startsWith('image/')) {
+      censorResult = await handleImageCensorship(file, env);
+    } else if (file.type.startsWith('video/')) {
+      censorResult = await handleVideoCensorship(file, env);
+    }
+
+    if (censorResult && !censorResult.ok) {
+      return censorResult.response;
+    }
+
+    // R2에 업로드
+    const code = await generateUniqueCode(env);
+    const ext = file.name.split('.').pop() || (file.type.startsWith('video/') ? 'mp4' : 'jpg');
+    const key = `${code}.${ext}`;
+    
+    await env.IMAGES.put(key, file.stream(), {
+      httpMetadata: { contentType: file.type }
+    });
+
+    // 메타데이터 저장
+    const fileUrl = `https://img.${new URL(request.url).host}/${key}`;
+    await env.IMAGES.put(code, JSON.stringify({
+      fileUrl, name: file.name, type: file.type, timestamp: Date.now()
+    }));
+
+    console.log(`[업로드 완료] 코드: ${code}, URL: ${fileUrl}`);
+    return new Response(JSON.stringify({
+      success: true, code, url: fileUrl, name: file.name
+    }), { headers: { 'Content-Type': 'application/json' } });
+  } catch (error) {
+    console.log('[업로드 오류]', error);
+    return new Response(JSON.stringify({
+      success: false, error: '업로드 처리 중 오류가 발생했습니다.'
+    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
-
-  const host = request.headers.get('host') || 'example.com';
-  const finalUrl = `https://${host}/${codes.join(",")}`;
-  const rawUrls = codes.map(code => `https://${host}/${code}?raw=1`);
-  console.log(">>> 업로드 완료 =>", finalUrl);
-
-  // API 응답에 추가 정보 포함
-  return new Response(JSON.stringify({ 
-    success: true, 
-    url: finalUrl,
-    rawUrls: rawUrls,
-    codes: codes,
-    fileTypes: files.map(file => file.type)
-  }), {
-    headers: { 'Content-Type': 'application/json' }
-  });
 }
 
-// 이미지 검열 - Gemini API 사용
+// 이미지 검열 - Qwen 2.5 VL API 사용
 async function handleImageCensorship(file, env) {
   try {
     const buf = await file.arrayBuffer();
     const base64 = arrayBufferToBase64(buf);
-    const geminiApiKey = env.GEMINI_API_KEY;
-    if (!geminiApiKey) {
+    const qwenApiKey = env.DASHSCOPE_API_KEY;
+    if (!qwenApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
+          success: false, error: 'DashScope API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
@@ -439,46 +358,47 @@ async function handleImageCensorship(file, env) {
     }
 
     const requestBody = {
-      contents: [{
-        parts: [
-          { text:
-            "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
-            "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
-            "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-            "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-            "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-            "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-            "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-            "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-            "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
-            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-            "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-           },
-          { inlineData: { mimeType: file.type, data: imageBase64 } }
+      model: "qwen2.5-vl-72b-instruct",
+      messages: [{
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:${file.type};base64,${imageBase64}`
+            }
+          },
+          {
+            type: "text",
+            text: "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+                  "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
+                  "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+                  "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+                  "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+                  "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+                  "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+                  "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+                  "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+                  "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
+                  "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+                  "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+                  "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+                  "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+                  "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+                  "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+                  "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+                  "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+          }
         ]
       }],
-      generationConfig: { 
-        temperature: 0.05, 
-        topK: 20, 
-        topP: 0.8, 
-        maxOutputTokens: 400,
-        thinkingConfig: {
-          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
-        }
-      }
+      temperature: 0.05,
+      max_tokens: 400
     };
 
-    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
+    const analysis = await callQwenAPI(qwenApiKey, requestBody);
     if (!analysis.success) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: `Gemini API 호출 오류: ${analysis.error}`
+          success: false, error: `Qwen API 호출 오류: ${analysis.error}`
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
@@ -491,25 +411,29 @@ async function handleImageCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-        contents: [{
-          parts: [
-            { text:
-              "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-              "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
-              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-             },
-            { inlineData: { mimeType: file.type, data: imageBase64 } }
+        model: "qwen2.5-vl-72b-instruct",
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:${file.type};base64,${imageBase64}`
+              }
+            },
+            {
+              type: "text",
+              text: "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+                    "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
+                    "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+            }
           ]
         }],
-        generationConfig: { 
-          temperature: 0.0, 
-          topK: 10, 
-          topP: 0.7, 
-          maxOutputTokens: 50
-        }
+        temperature: 0.0,
+        max_tokens: 50
       };
       
-      const reReview = await callGeminiAPI(geminiApiKey, reReviewBody);
+      const reReview = await callQwenAPI(qwenApiKey, reReviewBody);
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
         return { ok: true };
@@ -533,188 +457,154 @@ async function handleImageCensorship(file, env) {
   }
 }
 
-// 동영상 검열 - Gemini Video 파일 업로드 API 사용
+// 동영상 검열 - 임시 버킷 URL 방식
 async function handleVideoCensorship(file, env) {
   try {
-    console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
-    const geminiApiKey = env.GEMINI_API_KEY;
-    if (!geminiApiKey) {
+    console.log(`비디오 검열 시작: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
+    const qwenApiKey = env.DASHSCOPE_API_KEY;
+    if (!qwenApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
+          success: false, error: 'DashScope API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
 
-    // 1) Resumable upload 시작
-    const startResp = await fetch(
-      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
-      { method: 'POST',
-        headers: {
-          'X-Goog-Upload-Protocol': 'resumable',
-          'X-Goog-Upload-Command': 'start',
-          'X-Goog-Upload-Header-Content-Length': file.size,
-          'X-Goog-Upload-Header-Content-Type': file.type,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ file: { display_name: 'video_upload' } })
-      }
-    );
-    if (!startResp.ok) {
-      const err = await startResp.text();
-      throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
-    }
-    let uploadUrl =
-      startResp.headers.get('X-Goog-Upload-URL') ||
-      startResp.headers.get('Location');
-
-    if (!uploadUrl) {
-      // Response 본문을 두 번 읽으려면 clone() 사용
-      const cloneForJson = startResp.clone();
-      const cloneForText = startResp.clone();
-
-      // JSON 바디에서 가능한 필드 확인
-      const json = await cloneForJson.json().catch(() => null);
-      uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
-
-      if (!uploadUrl) {
-        const hdrs = [...startResp.headers]
-          .map(([k, v]) => `${k}: ${v}`)
-          .join('\n');
-        const textBody = await cloneForText.text().catch(() => '');
-        throw new Error(
-          `Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디:\n${textBody}`
-        );
-      }
+    // 임시 버킷 확인
+    if (!env.TEMP_BUCKET) {
+      console.log('임시 버킷이 없어서 기본 처리로 진행');
+      return { ok: true }; // 임시 버킷이 없으면 검열 생략
     }
 
-    // 2) 파일 업로드 및 finalize
-    const buffer = await file.arrayBuffer();
-    const uploadResp = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Length': file.size,
-        'X-Goog-Upload-Offset': '0',
-        'X-Goog-Upload-Command': 'upload, finalize'
-      },
-      body: buffer
-    });
-    if (!uploadResp.ok) {
-      const err = await uploadResp.text();
-      throw new Error(`비디오 업로드 실패: ${uploadResp.status} ${err}`);
+    // 대용량 비디오 파일 크기 제한 (300MB - R2 최대 객체 크기)
+    const maxVideoSize = 300 * 1024 * 1024;
+    if (file.size > maxVideoSize) {
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: '비디오 파일은 300MB 이하로만 업로드 가능합니다.'
+        }), { status: 413, headers: { 'Content-Type': 'application/json' } })
+      };
     }
 
-    // 3) 업로드 완료 응답에서 resource name 추출
-    const uploadResult = await uploadResp.json();
-    // file 객체 내부의 name 필드를 사용합니다.
-       const resourceName = uploadResult.file?.name;
-        if (!resourceName) {
-         throw new Error(
-           `업로드 완료 후 resource name을 확인할 수 없습니다. 응답: ${JSON.stringify(uploadResult)}`
-         );
-      }
-    // 4) 처리 완료 대기 (PROCESSING → ACTIVE)
-    const statusUrl = uploadResult.file?.uri + `?key=${env.GEMINI_API_KEY}`;
-    let statusResp = await fetch(statusUrl);
-    if (!statusResp.ok) {
-      throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
-    }
-    let myfile = await statusResp.json();
-    while (myfile.state === 'PROCESSING') {
-      console.log('비디오 처리 중...');
-      await new Promise(r => setTimeout(r, 5000));
-      statusResp = await fetch(statusUrl);
-      if (!statusResp.ok) {
-        throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
-      }
-      myfile = await statusResp.json();
-    }
-    if (myfile.state !== 'ACTIVE') {
-      throw new Error(`비디오 파일이 활성 상태가 아닙니다: ${myfile.state}`);
-    }
-
-    // 5) 검열 요청
-    const fileUri = uploadResult.file.uri;
-    const requestBody = {
-      contents: [{
-        parts: [
-          { text:
-              "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
-              "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
-              "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-              "Consider the entire video duration and any content that appears briefly. " +
-              "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-              "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-              "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-              "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-              "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-              "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-              "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
-              "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-              "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-              "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-              "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-              "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-              "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-              "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-              "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-             },
-          { file_data: { mime_type: file.type, file_uri: fileUri } }
-        ]
-      }],
-      generationConfig: { 
-        temperature: 0.05, 
-        topK: 20, 
-        topP: 0.8, 
-        maxOutputTokens: 400,
-        thinkingConfig: {
-          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
-        }
-      }
-    };
-    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
-    if (!analysis.success) {
-      throw new Error(analysis.error);
-    }
-    const bad = isInappropriateContent(analysis.text);
+    // 임시 버킷에 파일 업로드 (공개 읽기 권한)
+    const tempKey = `temp-video-${Date.now()}-${Math.random().toString(36).substring(7)}.${file.name.split('.').pop()}`;
     
-    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
-    if (bad.isInappropriate && bad.reasons.length >= 4) {
-      console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
-      
-      // 보수적 재검토 요청
-      const reReviewBody = {
-        contents: [{
-          parts: [
-            { text:
-              "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-              "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
-              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-             },
-            { file_data: { mime_type: file.type, file_uri: fileUri } }
+    await env.TEMP_BUCKET.put(tempKey, file.stream(), {
+      httpMetadata: { 
+        contentType: file.type,
+        cacheControl: 'max-age=3600' // 1시간 캐시
+      },
+      customMetadata: {
+        'temp-file': 'true',
+        'created-at': Date.now().toString(),
+        'expires-at': (Date.now() + 3600000).toString() // 1시간 후 만료
+      }
+    });
+
+    // 임시 공개 URL 생성 (임시 버킷의 공개 도메인 사용)
+    const videoUrl = `https://temp.${new URL(request.url).host}/${tempKey}`;
+
+    try {
+      const requestBody = {
+        model: "qwen2.5-vl-72b-instruct",
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "video_url",
+              video_url: {
+                url: videoUrl
+              }
+            },
+            {
+              type: "text",
+              text: "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
+                    "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
+                    "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+                    "Consider the entire video duration and any content that appears briefly. " +
+                    "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+                    "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+                    "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+                    "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+                    "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+                    "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+                    "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
+                    "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+                    "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+                    "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+                    "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+                    "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+                    "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+                    "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+                    "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+            }
           ]
         }],
-        generationConfig: { 
-          temperature: 0.0, 
-          topK: 10, 
-          topP: 0.7, 
-          maxOutputTokens: 50
-        }
+        temperature: 0.05,
+        max_tokens: 400
       };
+
+      const analysis = await callQwenAPI(qwenApiKey, requestBody);
       
-      const reReview = await callGeminiAPI(geminiApiKey, reReviewBody);
-      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
-        console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-        return { ok: true };
+      if (!analysis.success) {
+        throw new Error(analysis.error);
+      }
+      
+      const bad = isInappropriateContent(analysis.text);
+      
+      // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
+      if (bad.isInappropriate && bad.reasons.length >= 4) {
+        console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
+        
+        // 보수적 재검토 요청
+        const reReviewBody = {
+          model: "qwen2.5-vl-72b-instruct",
+          messages: [{
+            role: "user",
+            content: [
+              {
+                type: "video_url",
+                video_url: {
+                  url: videoUrl
+                }
+              },
+              {
+                type: "text",
+                text: "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+                      "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
+                      "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+              }
+            ]
+          }],
+          temperature: 0.0,
+          max_tokens: 50
+        };
+        
+        const reReview = await callQwenAPI(qwenApiKey, reReviewBody);
+        if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
+          console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
+          return { ok: true };
+        }
+      }
+      
+      if (bad.isInappropriate) {
+        console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
+        return { ok: false, response: new Response(JSON.stringify({
+            success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
+          }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+      }
+      
+      console.log(`[비디오 검열 완료] 적절한 콘텐츠로 판정`);
+      return { ok: true };
+      
+    } finally {
+      // 검열 완료 후 즉시 임시 파일 삭제
+      try {
+        await env.TEMP_BUCKET.delete(tempKey);
+        console.log(`[정리] 임시 비디오 파일 삭제 완료: ${tempKey}`);
+      } catch (deleteError) {
+        console.log(`[정리] 임시 파일 삭제 실패: ${deleteError.message}`);
       }
     }
     
-    if (bad.isInappropriate) {
-      console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
-        }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
-    }
-    return { ok: true };
   } catch (e) {
     console.log('handleVideoCensorship 오류:', e);
     return { ok: false, response: new Response(JSON.stringify({
@@ -723,16 +613,19 @@ async function handleVideoCensorship(file, env) {
   }
 }
 
-// Gemini API 호출 함수
-async function callGeminiAPI(apiKey, requestBody) {
+// Qwen API 호출 함수 (OpenAI 호환 엔드포인트 사용)
+async function callQwenAPI(apiKey, requestBody) {
   let retryCount = 0;
   const maxRetries = 3, retryDelay = 2000;
   while (retryCount < maxRetries) {
     try {
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const apiUrl = `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`;
       const response = await fetch(apiUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
         body: JSON.stringify(requestBody)
       });
       if (!response.ok) {
@@ -742,7 +635,7 @@ async function callGeminiAPI(apiKey, requestBody) {
           await new Promise(r => setTimeout(r, retryDelay));
           continue;
         }
-        console.log('Gemini API 호출 실패:', {
+        console.log('Qwen API 호출 실패:', {
           status: response.status,
           statusText: response.statusText,
           headers: Object.fromEntries([...response.headers])
@@ -752,38 +645,27 @@ async function callGeminiAPI(apiKey, requestBody) {
       }
       const data = await response.json();
       
-      // Gemini 2.5 Flash의 새로운 응답 구조 처리
-      const candidate = data.candidates?.[0];
-      if (!candidate?.content?.parts) {
-        console.log('Gemini API 응답 상태:', {
-          hasCandidates: !!data.candidates,
-          candidatesLength: data.candidates?.length || 0,
-          hasContent: !!candidate?.content,
-          hasParts: !!candidate?.content?.parts,
+      // OpenAI 호환 응답 구조 처리
+      const choice = data.choices?.[0];
+      if (!choice?.message?.content) {
+        console.log('Qwen API 응답 상태:', {
+          hasChoices: !!data.choices,
+          choicesLength: data.choices?.length || 0,
+          hasMessage: !!choice?.message,
+          hasContent: !!choice?.message?.content,
           responseKeys: Object.keys(data || {})
         });
-        return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
+        return { success: false, error: 'Qwen API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
 
-      // parts 배열에서 실제 응답 텍스트 찾기 (thought가 false이거나 없는 것)
-      let responseText = '';
-      for (const part of candidate.content.parts) {
-        if (part.text && (!part.thought || part.thought === false)) {
-          responseText += part.text;
-        }
-      }
-
-      // 실제 응답 텍스트가 없으면 첫 번째 텍스트 사용 (하위 호환성)
-      if (!responseText && candidate.content.parts[0]?.text) {
-        responseText = candidate.content.parts[0].text;
-      }
+      const responseText = choice.message.content;
 
       if (!responseText) {
-        console.log('Gemini API 응답 파싱 실패:', {
-          partsCount: candidate.content.parts.length,
-          parts: candidate.content.parts.map(p => ({ hasText: !!p.text, thought: p.thought }))
+        console.log('Qwen API 응답 파싱 실패:', {
+          messageRole: choice.message.role,
+          contentType: typeof choice.message.content
         });
-        return { success: false, error: 'Gemini API 응답에서 텍스트를 추출할 수 없습니다.' };
+        return { success: false, error: 'Qwen API 응답에서 텍스트를 추출할 수 없습니다.' };
       }
 
       return { success: true, text: responseText };
