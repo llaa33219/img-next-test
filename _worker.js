@@ -434,7 +434,7 @@ async function handleImageCensorship(file, env) {
     }
 
     const requestBody = {
-      model: "qwen/qwen2.5-vl-72b-instruct",
+      model: "qwen2.5-vl-72b-instruct",
       messages: [{
         role: "user",
         content: [
@@ -487,7 +487,7 @@ async function handleImageCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-        model: "qwen/qwen2.5-vl-72b-instruct",
+        model: "qwen2.5-vl-72b-instruct",
         messages: [{
           role: "user",
           content: [
@@ -564,7 +564,7 @@ async function handleVideoCensorship(file, env) {
     }
 
     const requestBody = {
-      model: "qwen/qwen2.5-vl-72b-instruct",
+      model: "qwen2.5-vl-72b-instruct",
       messages: [{
         role: "user",
         content: [
@@ -616,7 +616,7 @@ async function handleVideoCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-        model: "qwen/qwen2.5-vl-72b-instruct",
+        model: "qwen2.5-vl-72b-instruct",
         messages: [{
           role: "user",
           content: [
@@ -664,15 +664,14 @@ async function handleVideoCensorship(file, env) {
   }
 }
 
-// Qwen API 호출 함수 (OpenAI 호환)
+// Qwen 공식 API 호출 함수 (Alibaba Cloud DashScope)
 async function callQwenAPI(apiKey, requestBody) {
   let retryCount = 0;
   const maxRetries = 3, retryDelay = 2000;
   while (retryCount < maxRetries) {
     try {
-      // DeepInfra, OpenRouter 등의 서비스를 사용할 수 있습니다
-      // 여기서는 일반적인 OpenAI 호환 엔드포인트 형태로 구성
-      const apiUrl = 'https://api.deepinfra.com/v1/openai/chat/completions';
+      // Qwen 공식 API 엔드포인트 (Alibaba Cloud DashScope)
+      const apiUrl = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions';
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 
