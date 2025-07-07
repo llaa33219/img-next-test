@@ -148,8 +148,8 @@ export default {
       });
     }
 
-    // 1) [POST] /upload 또는 /upload/ => 업로드 처리 (웹 인터페이스)
-    if (request.method === 'POST' && path === '/upload') {
+    // 1) [POST] /api/upload => 업로드 처리 (API)
+    if (request.method === 'POST' && path === '/api/upload') {
       // 클라이언트 IP 가져오기
       const clientIP = request.headers.get('CF-Connecting-IP') || 
                       request.headers.get('X-Forwarded-For') || 
@@ -218,114 +218,181 @@ export default {
       });
     }
 
-    // 3) [GET] /:code => 업로드된 파일 조회
-    if (request.method === 'GET') {
-      const code = path.substring(1);
-      if (code && /^[a-zA-Z0-9]{8}$/.test(code)) {
-        const storedData = await env.IMAGES.get(code);
-        if (!storedData) {
-          return new Response(renderHTML('', url.host), {
-            headers: { 'Content-Type': 'text/html; charset=utf-8' }
-          });
-        }
-        const { fileUrl, name, type } = JSON.parse(storedData);
-        let mediaTag;
-        if (type.startsWith('video/')) {
-          mediaTag = `<video controls><source src="${fileUrl}" type="${type}">동영상을 재생할 수 없습니다.</video>`;
-        } else {
-          mediaTag = `<img src="${fileUrl}" alt="${name}">`;
-        }
-        return new Response(renderHTML(mediaTag, url.host), {
-          headers: { 'Content-Type': 'text/html; charset=utf-8' }
-        });
-      }
-    }
-
-    // 4) [GET] /api/docs => API 문서
+    // 3) [GET] /api/docs => API 문서
     if (request.method === 'GET' && path === '/api/docs') {
       return new Response(renderApiDocs(url.host), {
         headers: { 'Content-Type': 'text/html; charset=utf-8' }
       });
     }
 
-    // 404 처리
+    // 4) [GET] /{코드 또는 커스텀 이름} => R2 파일 or HTML
+    if (request.method === 'GET' && url.pathname.length > 1) {
+      if (url.pathname.includes('.')) {
+        return env.ASSETS ? env.ASSETS.fetch(request) : new Response('Not Found', { status: 404 });
+      }
+      
+      if (url.pathname.indexOf(',') !== -1) {
+        // 다중 파일 처리
+        const codes = url.pathname.slice(1).split(',').map(decodeURIComponent);
+        if (url.searchParams.get('raw') === '1') {
+          const object = await env.IMAGES.get(codes[0]);
+          if (!object) return new Response('Not Found', { status: 404 });
+          const headers = new Headers();
+          headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
+          return new Response(object.body, { headers });
+        }
+        
+        const objects = await Promise.all(codes.map(async code => ({
+          code,
+          object: await env.IMAGES.get(code)
+        })));
+        
+        let mediaTags = "";
+        for (const { code, object } of objects) {
+          if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
+            mediaTags += `<video src="https://${url.host}/${code}?raw=1" controls></video>\n`;
+          } else if (object) {
+            mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media">\n`;
+          }
+        }
+        return new Response(renderHTML(mediaTags, url.host), {
+          headers: { "Content-Type": "text/html; charset=UTF-8" }
+        });
+      } else {
+        // 단일 파일 처리
+        const key = decodeURIComponent(url.pathname.slice(1));
+        const object = await env.IMAGES.get(key);
+        if (!object) return new Response(renderHTML('', url.host), { 
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+        
+        if (url.searchParams.get('raw') === '1') {
+          const headers = new Headers();
+          headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
+          return new Response(object.body, { headers });
+        } else {
+          let mediaTag = "";
+          if (object.httpMetadata?.contentType?.startsWith('video/')) {
+            mediaTag = `<video src="https://${url.host}/${key}?raw=1" controls></video>\n`;
+          } else {
+            mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media">\n`;
+          }
+          return new Response(renderHTML(mediaTag, url.host), {
+            headers: { 'Content-Type': 'text/html; charset=UTF-8' }
+          });
+        }
+      }
+    }
+
+    // 5) 그 외 => 기본 처리
     return new Response('Not Found', { status: 404 });
   }
 };
 
-// 실제 업로드 처리
+// 메인 업로드 처리 함수
 async function handleUpload(request, env) {
-  try {
-    const formData = await request.formData();
-    const file = formData.get('file');
-    if (!file) {
-      return new Response(JSON.stringify({
-        success: false, error: '파일이 업로드되지 않았습니다.'
-      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-    }
+  const formData = await request.formData();
+  const files = formData.getAll('file');
+  let customName = formData.get('customName');
 
-    console.log(`[업로드 시작] 파일명: ${file.name}, 크기: ${file.size}bytes, 타입: ${file.type}`);
-
-    // 타입 검증
-    const allowedTypes = {
-      'image/jpeg': true, 'image/jpg': true, 'image/png': true, 'image/gif': true,
-      'image/webp': true, 'image/bmp': true, 'image/svg+xml': true,
-      'video/mp4': true, 'video/webm': true, 'video/quicktime': true,
-      'video/x-msvideo': true, 'video/avi': true
-    };
-    
-    if (!allowedTypes[file.type]) {
-      return new Response(JSON.stringify({
-        success: false, error: '지원되지 않는 파일 형식입니다.'
-      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-    }
-
-    // 크기 제한
-    const maxSize = file.type.startsWith('video/') ? 300 * 1024 * 1024 : 20 * 1024 * 1024;
-    if (file.size > maxSize) {
-      const limitStr = file.type.startsWith('video/') ? '300MB' : '20MB';
-      return new Response(JSON.stringify({
-        success: false, error: `파일 크기가 ${limitStr}를 초과합니다.`
-      }), { status: 413, headers: { 'Content-Type': 'application/json' } });
-    }
-
-    // 콘텐츠 검열
-    let censorResult;
-    if (file.type.startsWith('image/')) {
-      censorResult = await handleImageCensorship(file, env);
-    } else if (file.type.startsWith('video/')) {
-      censorResult = await handleVideoCensorship(file, env);
-    }
-
-    if (censorResult && !censorResult.ok) {
-      return censorResult.response;
-    }
-
-    // R2에 업로드
-    const code = await generateUniqueCode(env);
-    const ext = file.name.split('.').pop() || (file.type.startsWith('video/') ? 'mp4' : 'jpg');
-    const key = `${code}.${ext}`;
-    
-    await env.IMAGES.put(key, file.stream(), {
-      httpMetadata: { contentType: file.type }
+  if (!files || files.length === 0) {
+    return new Response(JSON.stringify({ success: false, error: '파일이 제공되지 않았습니다.' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' }
     });
+  }
 
-    // 메타데이터 저장
-    const fileUrl = `https://img.${new URL(request.url).host}/${key}`;
-    await env.IMAGES.put(code, JSON.stringify({
-      fileUrl, name: file.name, type: file.type, timestamp: Date.now()
-    }));
+  const allowedImageTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+  const allowedVideoTypes = ["video/mp4", "video/webm", "video/ogg", "video/x-msvideo", "video/avi", "video/msvideo"];
+  
+  for (const file of files) {
+    if (file.type.startsWith('image/')) {
+      if (!allowedImageTypes.includes(file.type)) {
+        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 이미지 형식입니다.' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    } else if (file.type.startsWith('video/')) {
+      if (!allowedVideoTypes.includes(file.type)) {
+        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 동영상 형식입니다.' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    } else {
+      return new Response(JSON.stringify({ success: false, error: '지원하지 않는 파일 형식입니다.' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' } 
+      });
+    }
+  }
 
-    console.log(`[업로드 완료] 코드: ${code}, URL: ${fileUrl}`);
+  // 1) 검열
+  try {
+    console.log(`[검열 시작] ${files.length}개 파일 검열 시작`);
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.type}, ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+      
+      const r = file.type.startsWith('image/')
+        ? await handleImageCensorship(file, env)
+        : await handleVideoCensorship(file, env);
+        
+      if (!r.ok) {
+        console.log(`[검열 실패] ${i + 1}번째 파일에서 검열 실패`);
+        return r.response;
+      } else {
+        console.log(`[검열 통과] ${i + 1}번째 파일 검열 통과`);
+      }
+    }
+    console.log(`[검열 완료] 모든 파일(${files.length}개) 검열 통과`);
+  } catch (e) {
+    console.log("검열 과정에서 예상치 못한 오류 발생:", e);
     return new Response(JSON.stringify({
-      success: true, code, url: fileUrl, name: file.name
-    }), { headers: { 'Content-Type': 'application/json' } });
-  } catch (error) {
-    console.log('[업로드 오류]', error);
-    return new Response(JSON.stringify({
-      success: false, error: '업로드 처리 중 오류가 발생했습니다.'
+      success: false,
+      error: `검열 처리 중 오류: ${e.message}`
     }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
+
+  // 2) R2 업로드
+  let codes = [];
+  if (customName && files.length === 1) {
+    customName = customName.replace(/ /g, "_");
+    if (await env.IMAGES.get(customName)) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: '이미 사용 중인 이름입니다. 다른 이름을 선택해주세요.'
+      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    }
+    const buffer = await files[0].arrayBuffer();
+    await env.IMAGES.put(customName, buffer, {
+      httpMetadata: { contentType: files[0].type }
+    });
+    codes.push(customName);
+  } else {
+    for (const file of files) {
+      const code = await generateUniqueCode(env);
+      const buffer = await file.arrayBuffer();
+      await env.IMAGES.put(code, buffer, {
+        httpMetadata: { contentType: file.type }
+      });
+      codes.push(code);
+    }
+  }
+
+  const host = request.headers.get('host') || 'example.com';
+  const finalUrl = `https://${host}/${codes.join(",")}`;
+  const rawUrls = codes.map(code => `https://${host}/${code}?raw=1`);
+  console.log(">>> 업로드 완료 =>", finalUrl);
+
+  // API 응답에 추가 정보 포함
+  return new Response(JSON.stringify({ 
+    success: true, 
+    url: finalUrl,
+    rawUrls: rawUrls,
+    codes: codes,
+    fileTypes: files.map(file => file.type)
+  }), {
+    headers: { 'Content-Type': 'application/json' }
+  });
 }
 
 // 이미지 검열 - Qwen 2.5 VL API 사용
@@ -1312,7 +1379,7 @@ function renderHTML(mediaTags, host) {
       }, 2000);
       
       try {
-        const response = await fetch('/upload', {
+        const response = await fetch('/api/upload', {
           method: 'POST',
           body: formData
         });
