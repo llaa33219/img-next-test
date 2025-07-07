@@ -148,8 +148,8 @@ export default {
       });
     }
 
-    // 1) [POST] /api/upload => 업로드 처리 (API)
-    if (request.method === 'POST' && path === '/api/upload') {
+    // 1) [POST] /upload 또는 /upload/ => 업로드 처리 (웹 인터페이스)
+    if (request.method === 'POST' && path === '/upload') {
       // 클라이언트 IP 가져오기
       const clientIP = request.headers.get('CF-Connecting-IP') || 
                       request.headers.get('X-Forwarded-For') || 
@@ -198,10 +198,13 @@ export default {
             finalResp = await handleUpload(request, env);
             requestsInProgress[cfReqId].resolve(finalResp);
           } catch (err) {
-            requestsInProgress[cfReqId].reject(err);
-            finalResp = new Response(JSON.stringify({
-              success: false, error: `업로드 처리 중 오류 발생: ${err.message}`
-            }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+            console.log("handleUpload error:", err);
+            const failResp = new Response(
+              JSON.stringify({ success: false, error: err.message }),
+              { status: 500, headers: { 'Content-Type': 'application/json' } }
+            );
+            requestsInProgress[cfReqId].reject(failResp);
+            finalResp = failResp;
           }
           return isExternalRequest ? addCorsHeaders(finalResp) : finalResp;
         }
@@ -211,28 +214,47 @@ export default {
       }
     }
 
-    // 2) [GET] / => HTML 페이지 반환 (업로드 인터페이스)
-    if (request.method === 'GET' && path === '') {
-      return new Response(renderHTML('', url.host), {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
-      });
+    // 2) [POST] /api/upload => API 전용 업로드 엔드포인트 (외부용)
+    else if (request.method === 'POST' && path === '/api/upload') {
+      // 클라이언트 IP 가져오기
+      const clientIP = request.headers.get('CF-Connecting-IP') || 
+                      request.headers.get('X-Forwarded-For') || 
+                      request.headers.get('X-Real-IP') || 
+                      'unknown';
+      
+      // 레이트 리미팅 검사
+      const rateLimitResult = checkRateLimit(clientIP);
+      if (rateLimitResult.blocked) {
+        console.log(`[Rate Limit] API IP ${clientIP} 차단됨: ${rateLimitResult.reason}`);
+        const response = new Response(JSON.stringify({
+          success: false,
+          error: `보안상 업로드가 제한되었습니다. ${rateLimitResult.reason}. ${rateLimitResult.remainingTime}초 후 다시 시도하세요.`,
+          rateLimited: true,
+          remainingTime: rateLimitResult.remainingTime
+        }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json' }
+        });
+        return addCorsHeaders(response);
+      }
+      
+      const response = await handleUpload(request, env);
+      return addCorsHeaders(response);
     }
 
-    // 3) [GET] /api/docs => API 문서
-    if (request.method === 'GET' && path === '/api/docs') {
+    // 3) [GET] /api => API 문서 제공
+    else if (request.method === 'GET' && path === '/api') {
       return new Response(renderApiDocs(url.host), {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        headers: { 'Content-Type': 'text/html; charset=UTF-8' }
       });
     }
 
     // 4) [GET] /{코드 또는 커스텀 이름} => R2 파일 or HTML
-    if (request.method === 'GET' && url.pathname.length > 1) {
+    else if (request.method === 'GET' && url.pathname.length > 1) {
       if (url.pathname.includes('.')) {
-        return env.ASSETS ? env.ASSETS.fetch(request) : new Response('Not Found', { status: 404 });
+        return env.ASSETS.fetch(request);
       }
-      
       if (url.pathname.indexOf(',') !== -1) {
-        // 다중 파일 처리
         const codes = url.pathname.slice(1).split(',').map(decodeURIComponent);
         if (url.searchParams.get('raw') === '1') {
           const object = await env.IMAGES.get(codes[0]);
@@ -241,17 +263,15 @@ export default {
           headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
           return new Response(object.body, { headers });
         }
-        
         const objects = await Promise.all(codes.map(async code => ({
           code,
           object: await env.IMAGES.get(code)
         })));
-        
         let mediaTags = "";
         for (const { code, object } of objects) {
           if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTags += `<video src="https://${url.host}/${code}?raw=1" controls></video>\n`;
-          } else if (object) {
+            mediaTags += `<video src="https://${url.host}/${code}?raw=1"></video>\n`;
+          } else {
             mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media">\n`;
           }
         }
@@ -259,13 +279,9 @@ export default {
           headers: { "Content-Type": "text/html; charset=UTF-8" }
         });
       } else {
-        // 단일 파일 처리
         const key = decodeURIComponent(url.pathname.slice(1));
         const object = await env.IMAGES.get(key);
-        if (!object) return new Response(renderHTML('', url.host), { 
-          headers: { 'Content-Type': 'text/html; charset=utf-8' }
-        });
-        
+        if (!object) return new Response('Not Found', { status: 404 });
         if (url.searchParams.get('raw') === '1') {
           const headers = new Headers();
           headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
@@ -273,7 +289,7 @@ export default {
         } else {
           let mediaTag = "";
           if (object.httpMetadata?.contentType?.startsWith('video/')) {
-            mediaTag = `<video src="https://${url.host}/${key}?raw=1" controls></video>\n`;
+            mediaTag = `<video src="https://${url.host}/${key}?raw=1"></video>\n`;
           } else {
             mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media">\n`;
           }
@@ -284,8 +300,8 @@ export default {
       }
     }
 
-    // 5) 그 외 => 기본 처리
-    return new Response('Not Found', { status: 404 });
+    // 5) 그 외 => 기본 정적 에셋
+    return env.ASSETS.fetch(request);
   }
 };
 
@@ -304,7 +320,6 @@ async function handleUpload(request, env) {
 
   const allowedImageTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
   const allowedVideoTypes = ["video/mp4", "video/webm", "video/ogg", "video/x-msvideo", "video/avi", "video/msvideo"];
-  
   for (const file of files) {
     if (file.type.startsWith('image/')) {
       if (!allowedImageTypes.includes(file.type)) {
@@ -320,8 +335,7 @@ async function handleUpload(request, env) {
       }
     } else {
       return new Response(JSON.stringify({ success: false, error: '지원하지 않는 파일 형식입니다.' }), {
-        status: 400, headers: { 'Content-Type': 'application/json' } 
-      });
+        status: 400, headers: { 'Content-Type': 'application/json' } });
     }
   }
 
@@ -395,46 +409,31 @@ async function handleUpload(request, env) {
   });
 }
 
-// 이미지 검열 - Qwen 2.5 VL API 사용
+// 이미지 검열 - Qwen 2.5 VL 72B Instruct API 사용
 async function handleImageCensorship(file, env) {
   try {
-    const buf = await file.arrayBuffer();
-    const base64 = arrayBufferToBase64(buf);
-    const qwenApiKey = env.DASHSCOPE_API_KEY;
+    const qwenApiKey = env.QWEN_API_KEY;
     if (!qwenApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'DashScope API 키가 설정되지 않았습니다.'
+          success: false, error: 'Qwen API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
 
-    let imageBase64 = base64;
-    if (buf.byteLength > 3 * 1024 * 1024) {
-      try {
-        const dataUrl = `data:${file.type};base64,${base64}`;
-        const resizedResp = await fetch(new Request(dataUrl, {
-          cf: { image: { width: 800, height: 800, fit: "inside" } }
-        }));
-        if (resizedResp.ok) {
-          const resizedBuf = await resizedResp.blob().then(b => b.arrayBuffer());
-          imageBase64 = arrayBufferToBase64(resizedBuf);
-        }
-      } catch (e) {
-        console.log("이미지 리사이징 실패:", e);
-      }
+    // 이미지를 임시 버킷에 업로드
+    const imageUrl = await uploadImageToTempBucket(file, env);
+    if (!imageUrl) {
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: '이미지 임시 업로드에 실패했습니다.'
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      };
     }
 
     const requestBody = {
-      model: "qwen2.5-vl-72b-instruct",
+      model: "qwen/qwen2.5-vl-72b-instruct",
       messages: [{
         role: "user",
         content: [
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:${file.type};base64,${imageBase64}`
-            }
-          },
           {
             type: "text",
             text: "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
@@ -455,6 +454,12 @@ async function handleImageCensorship(file, env) {
                   "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
                   "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
                   "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: imageUrl
+            }
           }
         ]
       }],
@@ -478,21 +483,21 @@ async function handleImageCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-        model: "qwen2.5-vl-72b-instruct",
+        model: "qwen/qwen2.5-vl-72b-instruct",
         messages: [{
           role: "user",
           content: [
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${file.type};base64,${imageBase64}`
-              }
-            },
             {
               type: "text",
               text: "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
                     "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
                     "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: imageUrl
+              }
             }
           ]
         }],
@@ -503,9 +508,14 @@ async function handleImageCensorship(file, env) {
       const reReview = await callQwenAPI(qwenApiKey, reReviewBody);
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
+        // 임시 이미지 정리
+        await cleanupTempImage(imageUrl, env);
         return { ok: true };
       }
     }
+    
+    // 임시 이미지 정리
+    await cleanupTempImage(imageUrl, env);
     
     if (bad.isInappropriate) {
       console.log(`[검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
@@ -524,154 +534,120 @@ async function handleImageCensorship(file, env) {
   }
 }
 
-// 동영상 검열 - 임시 버킷 URL 방식
+// 동영상 검열 - Qwen 2.5 VL 72B Instruct API 사용
 async function handleVideoCensorship(file, env) {
   try {
-    console.log(`비디오 검열 시작: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
-    const qwenApiKey = env.DASHSCOPE_API_KEY;
+    console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
+    const qwenApiKey = env.QWEN_API_KEY;
     if (!qwenApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'DashScope API 키가 설정되지 않았습니다.'
+          success: false, error: 'Qwen API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
 
-    // 임시 버킷 확인
-    if (!env.TEMP_BUCKET) {
-      console.log('임시 버킷이 없어서 기본 처리로 진행');
-      return { ok: true }; // 임시 버킷이 없으면 검열 생략
-    }
-
-    // 대용량 비디오 파일 크기 제한 (300MB - R2 최대 객체 크기)
-    const maxVideoSize = 300 * 1024 * 1024;
-    if (file.size > maxVideoSize) {
+    // 동영상을 임시 버킷에 업로드
+    const videoUrl = await uploadVideoToTempBucket(file, env);
+    if (!videoUrl) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: '비디오 파일은 300MB 이하로만 업로드 가능합니다.'
-        }), { status: 413, headers: { 'Content-Type': 'application/json' } })
+          success: false, error: '동영상 임시 업로드에 실패했습니다.'
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
 
-    // 임시 버킷에 파일 업로드 (공개 읽기 권한)
-    const tempKey = `temp-video-${Date.now()}-${Math.random().toString(36).substring(7)}.${file.name.split('.').pop()}`;
+    const requestBody = {
+      model: "qwen/qwen2.5-vl-72b-instruct",
+      messages: [{
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
+                  "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
+                  "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+                  "Consider the entire video duration and any content that appears briefly. " +
+                  "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+                  "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+                  "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+                  "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+                  "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+                  "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+                  "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
+                  "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+                  "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+                  "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+                  "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+                  "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+                  "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+                  "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+                  "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: videoUrl
+            }
+          }
+        ]
+      }],
+      temperature: 0.05,
+      max_tokens: 400
+    };
+
+    const analysis = await callQwenAPI(qwenApiKey, requestBody);
+    if (!analysis.success) {
+      await cleanupTempVideo(videoUrl, env);
+      throw new Error(analysis.error);
+    }
+
+    const bad = isInappropriateContent(analysis.text);
     
-    await env.TEMP_BUCKET.put(tempKey, file.stream(), {
-      httpMetadata: { 
-        contentType: file.type,
-        cacheControl: 'max-age=3600' // 1시간 캐시
-      },
-      customMetadata: {
-        'temp-file': 'true',
-        'created-at': Date.now().toString(),
-        'expires-at': (Date.now() + 3600000).toString() // 1시간 후 만료
-      }
-    });
-
-    // 임시 공개 URL 생성 (임시 버킷의 공개 도메인 사용)
-    const videoUrl = `https://temp.${new URL(request.url).host}/${tempKey}`;
-
-    try {
-      const requestBody = {
-        model: "qwen2.5-vl-72b-instruct",
+    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
+    if (bad.isInappropriate && bad.reasons.length >= 4) {
+      console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
+      
+      // 보수적 재검토 요청
+      const reReviewBody = {
+        model: "qwen/qwen2.5-vl-72b-instruct",
         messages: [{
           role: "user",
           content: [
             {
-              type: "video_url",
-              video_url: {
-                url: videoUrl
-              }
+              type: "text",
+              text: "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+                    "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
+                    "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
             },
             {
-              type: "text",
-              text: "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
-                    "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
-                    "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-                    "Consider the entire video duration and any content that appears briefly. " +
-                    "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-                    "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-                    "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-                    "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-                    "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-                    "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-                    "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
-                    "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-                    "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-                    "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-                    "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-                    "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-                    "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-                    "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-                    "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+              type: "image_url",
+              image_url: {
+                url: videoUrl
+              }
             }
           ]
         }],
-        temperature: 0.05,
-        max_tokens: 400
+        temperature: 0.0,
+        max_tokens: 50
       };
-
-      const analysis = await callQwenAPI(qwenApiKey, requestBody);
       
-      if (!analysis.success) {
-        throw new Error(analysis.error);
-      }
-      
-      const bad = isInappropriateContent(analysis.text);
-      
-      // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
-      if (bad.isInappropriate && bad.reasons.length >= 4) {
-        console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
-        
-        // 보수적 재검토 요청
-        const reReviewBody = {
-          model: "qwen2.5-vl-72b-instruct",
-          messages: [{
-            role: "user",
-            content: [
-              {
-                type: "video_url",
-                video_url: {
-                  url: videoUrl
-                }
-              },
-              {
-                type: "text",
-                text: "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-                      "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
-                      "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-              }
-            ]
-          }],
-          temperature: 0.0,
-          max_tokens: 50
-        };
-        
-        const reReview = await callQwenAPI(qwenApiKey, reReviewBody);
-        if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
-          console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-          return { ok: true };
-        }
-      }
-      
-      if (bad.isInappropriate) {
-        console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
-        return { ok: false, response: new Response(JSON.stringify({
-            success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
-          }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
-      }
-      
-      console.log(`[비디오 검열 완료] 적절한 콘텐츠로 판정`);
-      return { ok: true };
-      
-    } finally {
-      // 검열 완료 후 즉시 임시 파일 삭제
-      try {
-        await env.TEMP_BUCKET.delete(tempKey);
-        console.log(`[정리] 임시 비디오 파일 삭제 완료: ${tempKey}`);
-      } catch (deleteError) {
-        console.log(`[정리] 임시 파일 삭제 실패: ${deleteError.message}`);
+      const reReview = await callQwenAPI(qwenApiKey, reReviewBody);
+      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
+        console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
+        await cleanupTempVideo(videoUrl, env);
+        return { ok: true };
       }
     }
     
+    // 임시 동영상 정리
+    await cleanupTempVideo(videoUrl, env);
+    
+    if (bad.isInappropriate) {
+      console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+    }
+    return { ok: true };
   } catch (e) {
     console.log('handleVideoCensorship 오류:', e);
     return { ok: false, response: new Response(JSON.stringify({
@@ -680,13 +656,15 @@ async function handleVideoCensorship(file, env) {
   }
 }
 
-// Qwen API 호출 함수 (OpenAI 호환 엔드포인트 사용)
+// Qwen API 호출 함수 (OpenAI 호환)
 async function callQwenAPI(apiKey, requestBody) {
   let retryCount = 0;
   const maxRetries = 3, retryDelay = 2000;
   while (retryCount < maxRetries) {
     try {
-      const apiUrl = `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`;
+      // DeepInfra, OpenRouter 등의 서비스를 사용할 수 있습니다
+      // 여기서는 일반적인 OpenAI 호환 엔드포인트 형태로 구성
+      const apiUrl = 'https://api.deepinfra.com/v1/openai/chat/completions';
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 
@@ -695,6 +673,7 @@ async function callQwenAPI(apiKey, requestBody) {
         },
         body: JSON.stringify(requestBody)
       });
+      
       if (!response.ok) {
         if (response.status === 429 && retryCount < maxRetries - 1) {
           retryCount++;
@@ -710,6 +689,7 @@ async function callQwenAPI(apiKey, requestBody) {
         const errText = await response.text();
         return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
+      
       const data = await response.json();
       
       // OpenAI 호환 응답 구조 처리
@@ -726,11 +706,9 @@ async function callQwenAPI(apiKey, requestBody) {
       }
 
       const responseText = choice.message.content;
-
       if (!responseText) {
         console.log('Qwen API 응답 파싱 실패:', {
-          messageRole: choice.message.role,
-          contentType: typeof choice.message.content
+          message: choice.message
         });
         return { success: false, error: 'Qwen API 응답에서 텍스트를 추출할 수 없습니다.' };
       }
@@ -747,6 +725,76 @@ async function callQwenAPI(apiKey, requestBody) {
     }
   }
   return { success: false, error: '최대 재시도 횟수 초과' };
+}
+
+// =======================
+// 임시 버킷 관련 함수들
+// =======================
+
+// 이미지를 임시 버킷에 업로드하고 URL 반환
+async function uploadImageToTempBucket(file, env) {
+  try {
+    const tempKey = `temp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    const buffer = await file.arrayBuffer();
+    
+    await env.TEMP_BUCKET.put(tempKey, buffer, {
+      httpMetadata: { contentType: file.type }
+    });
+    
+    // 임시 버킷의 공개 URL 생성
+    // Cloudflare R2의 경우 Custom Domain이나 R2 Public URL을 사용
+    const tempUrl = env.TEMP_BUCKET_URL ? 
+      `${env.TEMP_BUCKET_URL}/${tempKey}` : 
+      `https://temp.${new URL(self.location).hostname}/${tempKey}`;
+    return tempUrl;
+  } catch (e) {
+    console.log('이미지 임시 업로드 오류:', e);
+    return null;
+  }
+}
+
+// 동영상을 임시 버킷에 업로드하고 URL 반환
+async function uploadVideoToTempBucket(file, env) {
+  try {
+    const tempKey = `temp_video_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    const buffer = await file.arrayBuffer();
+    
+    await env.TEMP_BUCKET.put(tempKey, buffer, {
+      httpMetadata: { contentType: file.type }
+    });
+    
+    // 임시 버킷의 공개 URL 생성
+    // Cloudflare R2의 경우 Custom Domain이나 R2 Public URL을 사용
+    const tempUrl = env.TEMP_BUCKET_URL ? 
+      `${env.TEMP_BUCKET_URL}/${tempKey}` : 
+      `https://temp.${new URL(self.location).hostname}/${tempKey}`;
+    return tempUrl;
+  } catch (e) {
+    console.log('동영상 임시 업로드 오류:', e);
+    return null;
+  }
+}
+
+// 임시 이미지 정리
+async function cleanupTempImage(imageUrl, env) {
+  try {
+    const tempKey = imageUrl.split('/').pop();
+    await env.TEMP_BUCKET.delete(tempKey);
+    console.log(`임시 이미지 정리 완료: ${tempKey}`);
+  } catch (e) {
+    console.log('임시 이미지 정리 오류:', e);
+  }
+}
+
+// 임시 동영상 정리
+async function cleanupTempVideo(videoUrl, env) {
+  try {
+    const tempKey = videoUrl.split('/').pop();
+    await env.TEMP_BUCKET.delete(tempKey);
+    console.log(`임시 동영상 정리 완료: ${tempKey}`);
+  } catch (e) {
+    console.log('임시 동영상 정리 오류:', e);
+  }
 }
 
 // =======================
@@ -881,14 +929,14 @@ function renderHTML(mediaTags, host) {
   
     button {
         background-color: #007BFF;
-        color: white;
-        border: none;
-        border-radius: 20px;
-        padding: 10px 20px;
-        margin: 20px 0;
-        width: 600px;
+        /* color: white; */
+        /* border: none; */
+        /* border-radius: 20px; */
+        /* padding: 10px 20px; */
+        /* margin: 20px 0; */
+        /* width: 600px; */
         height: 61px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+        /* box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2); */
         cursor: pointer;
         transition: background-color 0.3s ease, transform 0.1s ease, box-shadow 0.3s ease;
         font-weight: bold;
@@ -897,9 +945,9 @@ function renderHTML(mediaTags, host) {
     }
   
     button:hover {
-        background-color: #005BDD;
-        transform: translateY(2px);
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        /* background-color: #005BDD; */
+        /* transform: translateY(2px); */
+        /* box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); */
     }
   
     button:active {
@@ -1104,84 +1152,6 @@ function renderHTML(mediaTags, host) {
       display: none;
     }
   
-    /* 커스텀 이름 관련 스타일 */
-    .custom-name-option {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      width: 600px;
-      margin: 10px 0;
-      background-color: #f8f9fa00;
-      border-radius: 20px;
-      padding: 15px;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0);
-    }
-
-    .custom-name-option label {
-      display: flex;
-      align-items: center;
-      margin: 0 15px;
-      font-size: 16px;
-      color: #333;
-      cursor: pointer;
-      transition: color 0.3s ease;
-    }
-
-    .custom-name-option input[type="radio"] {
-      appearance: none;
-      -webkit-appearance: none;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      border: 2px solid #007BFF;
-      outline: none;
-      margin-right: 10px;
-      position: relative;
-      cursor: pointer;
-      transition: all 0.3s ease;
-    }
-
-    .custom-name-option input[type="radio"]:checked {
-      background-color: #007BFF;
-      border-color: #007BFF;
-    }
-
-    .custom-name-option input[type="radio"]:checked::after {
-      content: '';
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      width: 10px;
-      height: 10px;
-      background-color: white;
-      border-radius: 50%;
-    }
-
-    .custom-name-option input[type="radio"]:hover {
-      box-shadow: 0 0 0 4px rgba(0, 123, 255, 0.2);
-    }
-
-    #customNameInput {
-      width: 400px;
-      padding: 10px;
-      margin-top: 15px;
-      border: 2px solid #007BFF;
-      border-radius: 14px;
-      font-size: 16px;
-      transition: all 0.3s ease;
-      display: none;
-    }
-
-    #customNameInput:focus {
-      outline: none;
-      box-shadow: 0 0 0 4px rgba(0, 123, 255, 0.2);
-    }
-
-    #customNameInput.active {
-      display: block;
-    }
-  
     @media (max-width: 768px) {
       button {
         width: 300px;
@@ -1197,21 +1167,6 @@ function renderHTML(mediaTags, host) {
       }
       .title-img-mobile {
         display: block;
-      }
-      .custom-name-option {
-        flex-direction: column;
-        width: 300px;
-        padding: 15px;
-      }
-
-      .custom-name-option label {
-        margin: 10px 0;
-        width: 100%;
-        justify-content: center;
-      }
-
-      #customNameInput {
-        width: 280px;
       }
     }
     .player-container video {
@@ -1250,33 +1205,6 @@ function renderHTML(mediaTags, host) {
       <h1 class="title-img-desktop">이미지 공유</h1>
       <h1 class="title-img-mobile">이미지<br>공유</h1>
   </div>
-  
-  <div class="upload-container" id="uploadContainer">
-    <button id="fileSelectButton">파일 선택(이미지 및 영상)</button>
-    <input type="file" id="fileInput" accept="image/*,video/*" style="display: none;" multiple>
-    <div id="fileNameDisplay">파일 선택 안됨</div>
-    
-    <!-- 커스텀 이름 옵션 -->
-    <div class="custom-name-option">
-      <label>
-        <input type="radio" name="nameOption" value="default" checked> 자동 생성(기본)
-      </label>
-      <label>
-        <input type="radio" name="nameOption" value="custom"> 커스텀 이름
-      </label>
-    </div>
-    <div class="custom-name-container">
-      <input type="text" id="customNameInput" placeholder="커스텀 이름 입력">
-    </div>
-    
-    <button id="uploadButton">업로드</button>
-    <p id="status"></p>
-    <div class="link-container">
-      <input type="text" id="linkBox" readonly>
-      <button class="copy-button" id="copyButton"></button>
-    </div>
-  </div>
-  
   <div id="imageContainer">
     ${mediaTags}
   </div>
@@ -1297,161 +1225,13 @@ function renderHTML(mediaTags, host) {
   </div>
   
   <div class="custom-context-menu" id="customContextMenu" style="display: none;">
-      <button id="copyImage">복사</button>
+      <button id="copyImage">이미지 복사</button>
+      <button id="copyImageurl">이미지 링크 복사</button>
       <button id="downloadImage">다운로드</button>
+      <button id="downloadImagepng">png로 다운로드</button>
   </div>
   <script>
-    // 업로드 폼 관련 변수들
-    const fileSelectButton = document.getElementById('fileSelectButton');
-    const fileInput = document.getElementById('fileInput');
-    const fileNameDisplay = document.getElementById('fileNameDisplay');
-    const uploadButton = document.getElementById('uploadButton');
-    const statusElem = document.getElementById('status');
-    const linkBox = document.getElementById('linkBox');
-    const copyButton = document.getElementById('copyButton');
-    const customNameInput = document.getElementById('customNameInput');
-    const nameOptions = document.querySelectorAll('input[name="nameOption"]');
-
-    // 이름 옵션 라디오 버튼 처리
-    nameOptions.forEach(option => {
-      option.addEventListener('change', () => {
-        if (option.value === 'custom') {
-          customNameInput.classList.add('active');
-          if (fileInput.files.length === 1) {
-            const fileName = fileInput.files[0].name;
-            const baseName = fileName.substring(0, fileName.lastIndexOf('.'));
-            customNameInput.value = baseName;
-          }
-        } else {
-          customNameInput.classList.remove('active');
-        }
-      });
-    });
-
-    // 파일 선택 버튼 이벤트
-    fileSelectButton.addEventListener('click', () => {
-      fileInput.click();
-    });
-
-    // 파일 선택 시 파일명 업데이트
-    fileInput.addEventListener('change', () => {
-      if (fileInput.files.length > 0) {
-        const names = Array.from(fileInput.files).map(f => f.name);
-        fileNameDisplay.textContent = names.join(', ');
-        
-        const customNameOption = document.querySelector('input[name="nameOption"][value="custom"]');
-        if (customNameOption.checked && fileInput.files.length === 1) {
-          const fileName = fileInput.files[0].name;
-          const baseName = fileName.substring(0, fileName.lastIndexOf('.'));
-          customNameInput.value = baseName;
-        }
-      } else {
-        fileNameDisplay.textContent = '파일 선택 안됨';
-      }
-    });
-
-    // 업로드 버튼 클릭 이벤트
-    uploadButton.addEventListener('click', async () => {
-      if (fileInput.files.length === 0) {
-        statusElem.textContent = '파일이 선택되지 않았습니다.';
-        return;
-      }
-      
-      const isCustomName = document.querySelector('input[name="nameOption"][value="custom"]').checked;
-      if (isCustomName && !customNameInput.value.trim()) {
-        statusElem.textContent = '사용자 지정 이름을 입력해주세요.';
-        customNameInput.focus();
-        return;
-      }
-      
-      statusElem.textContent = '검열 중...';
-      const formData = new FormData();
-      for (const file of fileInput.files) {
-        formData.append('file', file);
-      }
-      
-      if (isCustomName) {
-        formData.append('customName', customNameInput.value.trim());
-      }
-      
-      const timer = setTimeout(() => {
-        statusElem.textContent = '업로드 중...';
-      }, 2000);
-      
-      try {
-        const response = await fetch('/api/upload', {
-          method: 'POST',
-          body: formData
-        });
-        clearTimeout(timer);
-        const result = await response.json();
-        
-        if (result.success) {
-          linkBox.value = result.url;
-          statusElem.textContent = '업로드 성공';
-        } else {
-          if (result.rateLimited) {
-            const minutes = Math.floor(result.remainingTime / 60);
-            const seconds = result.remainingTime % 60;
-            const timeText = minutes > 0 ? \`\${minutes}분 \${seconds}초\` : \`\${seconds}초\`;
-            statusElem.textContent = \`⚠️ 보안 제한: \${timeText} 후 다시 시도하세요\`;
-            statusElem.style.color = '#ff6b6b';
-            
-            setTimeout(() => {
-              statusElem.style.color = '';
-            }, 5000);
-          } else {
-            statusElem.textContent = '업로드 실패: ' + (result.error || '알 수 없는 에러');
-          }
-        }
-      } catch (err) {
-        clearTimeout(timer);
-        statusElem.textContent = '업로드 중 오류 발생: ' + err.message;
-      }
-    });
-
-    // 복사 버튼 클릭 이벤트
-    copyButton.addEventListener('click', async () => {
-      if (linkBox.value) {
-        try {
-          await navigator.clipboard.writeText(linkBox.value);
-          statusElem.textContent = '링크가 복사되었습니다.';
-        } catch (err) {
-          statusElem.textContent = '복사 실패: ' + err.message;
-        }
-      }
-    });
-
-    // 클립보드에서 이미지 붙여넣기
-    document.addEventListener('paste', (event) => {
-      const clipboardItems = event.clipboardData.items;
-      let hasImage = false;
-      const dt = new DataTransfer();
-      
-      for (const file of fileInput.files) {
-        dt.items.add(file);
-      }
-      
-      for (let i = 0; i < clipboardItems.length; i++) {
-        const item = clipboardItems[i];
-        if (item.type && item.type.startsWith('image/')) {
-          const file = item.getAsFile();
-          if (file) {
-            dt.items.add(file);
-            hasImage = true;
-          }
-        }
-      }
-      
-      if (hasImage) {
-        fileInput.files = dt.files;
-        const names = Array.from(fileInput.files).map(f => f.name);
-        fileNameDisplay.textContent = names.join(', ');
-        statusElem.textContent = '클립보드에서 이미지 추가됨.';
-      }
-    });
-
-    // 이미지 뷰어 기능
+    // 새로운 이미지 뷰어 기능
     class ImageViewer {
       constructor() {
         this.modal = document.getElementById('imageModal');
@@ -1475,64 +1255,56 @@ function renderHTML(mediaTags, host) {
       }
       
       init() {
+        // 이벤트 리스너 등록
         this.closeBtn.addEventListener('click', () => this.closeModal());
         this.modal.addEventListener('click', (e) => {
           if (e.target === this.modal) this.closeModal();
         });
         
+        // 컨트롤 버튼 이벤트
         this.zoomInBtn.addEventListener('click', () => this.zoomIn());
         this.zoomOutBtn.addEventListener('click', () => this.zoomOut());
         this.rotateLeftBtn.addEventListener('click', () => this.rotateLeft());
         this.rotateRightBtn.addEventListener('click', () => this.rotateRight());
         this.resetBtn.addEventListener('click', () => this.resetView());
         
-        this.modalImage.addEventListener('mousedown', (e) => this.startDrag(e));
-        document.addEventListener('mousemove', (e) => this.drag(e));
-        document.addEventListener('mouseup', () => this.endDrag());
+                 // 마우스 드래그 이벤트
+         this.modalImage.addEventListener('mousedown', (e) => this.startDrag(e));
+         document.addEventListener('mousemove', (e) => this.drag(e));
+         document.addEventListener('mouseup', () => this.endDrag());
+         
+         // 터치 드래그 이벤트 (모바일)
+         this.modalImage.addEventListener('touchstart', (e) => this.startTouch(e));
+         document.addEventListener('touchmove', (e) => this.touchMove(e));
+         document.addEventListener('touchend', () => this.endDrag());
+         
+         // 브라우저 기본 드래그 및 더블탭 확대 방지
+         this.modalImage.addEventListener('dragstart', (e) => e.preventDefault());
+         this.modalImage.addEventListener('gesturestart', (e) => e.preventDefault());
+         this.modalImage.addEventListener('gesturechange', (e) => e.preventDefault());
+         this.modalImage.addEventListener('gestureend', (e) => e.preventDefault());
         
-        this.modalImage.addEventListener('touchstart', (e) => this.startTouch(e));
-        document.addEventListener('touchmove', (e) => this.touchMove(e));
-        document.addEventListener('touchend', () => this.endDrag());
-        
-        this.modalImage.addEventListener('dragstart', (e) => e.preventDefault());
+        // 마우스 휠로 확대/축소
         this.modalImage.addEventListener('wheel', (e) => this.handleWheel(e));
         
+        // ESC 키로 닫기
         document.addEventListener('keydown', (e) => {
           if (e.key === 'Escape' && this.modal.style.display === 'block') {
             this.closeModal();
           }
         });
         
+        // 이미지 클릭 이벤트 등록
         this.setupImageClickHandlers();
       }
       
       setupImageClickHandlers() {
-        const observer = new MutationObserver((mutations) => {
-          mutations.forEach((mutation) => {
-            mutation.addedNodes.forEach((node) => {
-              if (node.nodeType === 1) {
-                const images = node.querySelectorAll ? node.querySelectorAll('img') : [];
-                images.forEach(img => this.addClickHandler(img));
-                if (node.tagName === 'IMG') {
-                  this.addClickHandler(node);
-                }
-              }
-            });
-          });
-        });
-        
-        observer.observe(document.getElementById('imageContainer'), {
-          childList: true,
-          subtree: true
-        });
-        
         document.querySelectorAll('#imageContainer img').forEach(img => {
           this.addClickHandler(img);
         });
       }
       
       addClickHandler(img) {
-        img.removeAttribute('onclick');
         img.addEventListener('click', (e) => {
           e.preventDefault();
           this.openModal(img.src);
@@ -1579,51 +1351,51 @@ function renderHTML(mediaTags, host) {
         this.updateTransform();
       }
       
-      startDrag(e) {
-        if (this.scale > 1) {
-          this.isDragging = true;
-          this.startX = e.clientX - this.posX;
-          this.startY = e.clientY - this.posY;
-          this.modalImage.classList.add('dragging');
-          e.preventDefault();
-        }
-      }
-      
-      startTouch(e) {
-        if (this.scale > 1 && e.touches.length === 1) {
-          this.isDragging = true;
-          const touch = e.touches[0];
-          this.startX = touch.clientX - this.posX;
-          this.startY = touch.clientY - this.posY;
-          this.modalImage.classList.add('dragging');
-          e.preventDefault();
-        }
-      }
-      
-      drag(e) {
-        if (this.isDragging) {
-          this.posX = e.clientX - this.startX;
-          this.posY = e.clientY - this.startY;
-          this.updateTransform();
-        }
-      }
-      
-      touchMove(e) {
-        if (this.isDragging && e.touches.length === 1) {
-          const touch = e.touches[0];
-          this.posX = touch.clientX - this.startX;
-          this.posY = touch.clientY - this.startY;
-          this.updateTransform();
-          e.preventDefault();
-        }
-      }
-      
-      endDrag() {
-        if (this.isDragging) {
-          this.isDragging = false;
-          this.modalImage.classList.remove('dragging');
-        }
-      }
+             startDrag(e) {
+         if (this.scale > 1) {
+           this.isDragging = true;
+           this.startX = e.clientX - this.posX;
+           this.startY = e.clientY - this.posY;
+           this.modalImage.classList.add('dragging');
+           e.preventDefault();
+         }
+       }
+       
+       startTouch(e) {
+         if (this.scale > 1 && e.touches.length === 1) {
+           this.isDragging = true;
+           const touch = e.touches[0];
+           this.startX = touch.clientX - this.posX;
+           this.startY = touch.clientY - this.posY;
+           this.modalImage.classList.add('dragging');
+           e.preventDefault();
+         }
+       }
+       
+       drag(e) {
+         if (this.isDragging) {
+           this.posX = e.clientX - this.startX;
+           this.posY = e.clientY - this.startY;
+           this.updateTransform();
+         }
+       }
+       
+       touchMove(e) {
+         if (this.isDragging && e.touches.length === 1) {
+           const touch = e.touches[0];
+           this.posX = touch.clientX - this.startX;
+           this.posY = touch.clientY - this.startY;
+           this.updateTransform();
+           e.preventDefault();
+         }
+       }
+       
+       endDrag() {
+         if (this.isDragging) {
+           this.isDragging = false;
+           this.modalImage.classList.remove('dragging');
+         }
+       }
       
       handleWheel(e) {
         e.preventDefault();
@@ -1639,56 +1411,99 @@ function renderHTML(mediaTags, host) {
         this.modalImage.style.transform = transform;
       }
     }
-
-    // 컨텍스트 메뉴 기능
+    
+    // 이미지 뷰어 초기화
+    document.addEventListener('DOMContentLoaded', () => {
+      new ImageViewer();
+    });
+    
+    document.getElementById('toggleButton')?.addEventListener('click',function(){
+      window.location.href='/';
+    });
+    
+    // Custom Context Menu Functionality
     let currentImage = null;
     const contextMenu = document.getElementById('customContextMenu');
 
     document.getElementById('imageContainer').addEventListener('contextmenu', function(e) {
-      if(e.target.tagName.toLowerCase() === 'img'){
-        e.preventDefault();
-        currentImage = e.target;
-        contextMenu.style.top = e.pageY + 'px';
-        contextMenu.style.left = e.pageX + 'px';
-        contextMenu.style.display = 'block';
-      }
-    });
-
-    document.addEventListener('click', function(e) {
-      if(contextMenu.style.display === 'block'){
-        contextMenu.style.display = 'none';
-      }
-    });
-
-    document.getElementById('copyImage').addEventListener('click', async function(){
-      if(currentImage){
-        try {
-          const response = await fetch(currentImage.src);
-          const blob = await response.blob();
-          await navigator.clipboard.write([
-            new ClipboardItem({ [blob.type]: blob })
-          ]);
-          alert('이미지 복사됨');
-        } catch(err) {
-          alert('이미지 복사 실패: ' + err.message);
+        if(e.target.tagName.toLowerCase() === 'img'){
+            e.preventDefault();
+            currentImage = e.target;
+            contextMenu.style.top = e.pageY + 'px';
+            contextMenu.style.left = e.pageX + 'px';
+            contextMenu.style.display = 'block';
         }
-      }
     });
 
+    // Hide context menu on document click
+    document.addEventListener('click', function(e) {
+        if(contextMenu.style.display === 'block'){
+            contextMenu.style.display = 'none';
+        }
+    });
+
+    // "이미지 복사" 버튼 클릭
+    document.getElementById('copyImage').addEventListener('click', async function(){
+        if(currentImage){
+            try {
+                const response = await fetch(currentImage.src);
+                const blob = await response.blob();
+                await navigator.clipboard.write([
+                    new ClipboardItem({ [blob.type]: blob })
+                ]);
+                alert('이미지 복사됨');
+            } catch(err) {
+                alert('이미지 복사 실패: ' + err.message);
+            }
+        }
+    });
+
+    // "이미지 링크 복사" 버튼 클릭
+    document.getElementById('copyImageurl').addEventListener('click', async function(){
+        if(currentImage){
+            try {
+                await navigator.clipboard.writeText(currentImage.src);
+                alert('이미지 링크 복사됨');
+            } catch(err) {
+                alert('이미지 링크 복사 실패: ' + err.message);
+            }
+        }
+    });
+
+    // "다운로드" 버튼 클릭 (원본 이미지 다운로드)
     document.getElementById('downloadImage').addEventListener('click', function(){
-      if(currentImage){
-        const a = document.createElement('a');
-        a.href = currentImage.src;
-        a.download = 'image';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }
+        if(currentImage){
+            const a = document.createElement('a');
+            a.href = currentImage.src;
+            a.download = 'image';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }
     });
 
-    // 초기화
-    document.addEventListener('DOMContentLoaded', () => {
-      new ImageViewer();
+    // "png로 다운로드" 버튼 클릭 (이미지를 png로 변환하여 다운로드)
+    document.getElementById('downloadImagepng').addEventListener('click', function(){
+        if(currentImage){
+            const canvas = document.createElement('canvas');
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            img.onload = function(){
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                canvas.toBlob(function(blob){
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = 'image.png';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                }, 'image/png');
+            };
+            img.src = currentImage.src;
+        }
     });
   </script>
 </body>
@@ -1789,7 +1604,7 @@ function renderApiDocs(host) {
     <h1>이미지 공유 API 문서</h1>
   </div>
   
-  <p>이 API는 외부 애플리케이션에서 이미지 및 동영상을 업로드하고 공유할 수 있는 기능을 제공합니다. 모든 콘텐츠는 업로드 전 자동 검열됩니다.</p>
+  <p>이 API는 외부 애플리케이션에서 이미지 및 동영상을 업로드하고 공유할 수 있는 기능을 제공합니다. 모든 콘텐츠는 Qwen 2.5 VL 72B Instruct 모델을 통한 자동 검열을 거칩니다.</p>
   
   <h2>엔드포인트</h2>
   
@@ -1852,7 +1667,7 @@ function renderApiDocs(host) {
     <p>서버 오류 (500 Internal Server Error):</p>
     <pre>{
   "success": false,
-  "error": "검열 처리 중 오류: [오류 메시지]"
+  "error": "Qwen 검열 처리 중 오류: [오류 메시지]"
 }</pre>
     
     <p>레이트 리미팅 (429 Too Many Requests):</p>
@@ -1923,7 +1738,8 @@ else:
   
   <h2>노트</h2>
   <ul>
-    <li>모든 업로드된 파일은 자동 검열 시스템을 통과해야 합니다.</li>
+    <li>모든 업로드된 파일은 Qwen 2.5 VL 72B Instruct 모델을 사용한 자동 검열 시스템을 통과해야 합니다.</li>
+    <li>검열 과정에서 파일이 임시 버킷에 업로드되고, 검열 완료 후 자동으로 정리됩니다.</li>
     <li>대용량 파일 업로드 시 서버 처리 시간이 길어질 수 있습니다.</li>
     <li>기본적으로 랜덤 코드가 생성되지만, <code>customName</code> 파라미터를 통해 사용자 지정 이름을 부여할 수 있습니다.</li>
     <li>동일한 사용자 지정 이름이 이미 존재하는 경우 업로드가 실패합니다.</li>
