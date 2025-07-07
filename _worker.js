@@ -814,14 +814,14 @@ function renderHTML(mediaTags, host) {
   
     button {
         background-color: #007BFF;
-        /* color: white; */
-        /* border: none; */
-        /* border-radius: 20px; */
-        /* padding: 10px 20px; */
-        /* margin: 20px 0; */
-        /* width: 600px; */
+        color: white;
+        border: none;
+        border-radius: 20px;
+        padding: 10px 20px;
+        margin: 20px 0;
+        width: 600px;
         height: 61px;
-        /* box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2); */
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
         cursor: pointer;
         transition: background-color 0.3s ease, transform 0.1s ease, box-shadow 0.3s ease;
         font-weight: bold;
@@ -830,9 +830,9 @@ function renderHTML(mediaTags, host) {
     }
   
     button:hover {
-        /* background-color: #005BDD; */
-        /* transform: translateY(2px); */
-        /* box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); */
+        background-color: #005BDD;
+        transform: translateY(2px);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
     }
   
     button:active {
@@ -1037,6 +1037,84 @@ function renderHTML(mediaTags, host) {
       display: none;
     }
   
+    /* 커스텀 이름 관련 스타일 */
+    .custom-name-option {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      width: 600px;
+      margin: 10px 0;
+      background-color: #f8f9fa00;
+      border-radius: 20px;
+      padding: 15px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0);
+    }
+
+    .custom-name-option label {
+      display: flex;
+      align-items: center;
+      margin: 0 15px;
+      font-size: 16px;
+      color: #333;
+      cursor: pointer;
+      transition: color 0.3s ease;
+    }
+
+    .custom-name-option input[type="radio"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 2px solid #007BFF;
+      outline: none;
+      margin-right: 10px;
+      position: relative;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+
+    .custom-name-option input[type="radio"]:checked {
+      background-color: #007BFF;
+      border-color: #007BFF;
+    }
+
+    .custom-name-option input[type="radio"]:checked::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 10px;
+      height: 10px;
+      background-color: white;
+      border-radius: 50%;
+    }
+
+    .custom-name-option input[type="radio"]:hover {
+      box-shadow: 0 0 0 4px rgba(0, 123, 255, 0.2);
+    }
+
+    #customNameInput {
+      width: 400px;
+      padding: 10px;
+      margin-top: 15px;
+      border: 2px solid #007BFF;
+      border-radius: 14px;
+      font-size: 16px;
+      transition: all 0.3s ease;
+      display: none;
+    }
+
+    #customNameInput:focus {
+      outline: none;
+      box-shadow: 0 0 0 4px rgba(0, 123, 255, 0.2);
+    }
+
+    #customNameInput.active {
+      display: block;
+    }
+  
     @media (max-width: 768px) {
       button {
         width: 300px;
@@ -1052,6 +1130,21 @@ function renderHTML(mediaTags, host) {
       }
       .title-img-mobile {
         display: block;
+      }
+      .custom-name-option {
+        flex-direction: column;
+        width: 300px;
+        padding: 15px;
+      }
+
+      .custom-name-option label {
+        margin: 10px 0;
+        width: 100%;
+        justify-content: center;
+      }
+
+      #customNameInput {
+        width: 280px;
       }
     }
     .player-container video {
@@ -1090,6 +1183,33 @@ function renderHTML(mediaTags, host) {
       <h1 class="title-img-desktop">이미지 공유</h1>
       <h1 class="title-img-mobile">이미지<br>공유</h1>
   </div>
+  
+  <div class="upload-container" id="uploadContainer">
+    <button id="fileSelectButton">파일 선택(이미지 및 영상)</button>
+    <input type="file" id="fileInput" accept="image/*,video/*" style="display: none;" multiple>
+    <div id="fileNameDisplay">파일 선택 안됨</div>
+    
+    <!-- 커스텀 이름 옵션 -->
+    <div class="custom-name-option">
+      <label>
+        <input type="radio" name="nameOption" value="default" checked> 자동 생성(기본)
+      </label>
+      <label>
+        <input type="radio" name="nameOption" value="custom"> 커스텀 이름
+      </label>
+    </div>
+    <div class="custom-name-container">
+      <input type="text" id="customNameInput" placeholder="커스텀 이름 입력">
+    </div>
+    
+    <button id="uploadButton">업로드</button>
+    <p id="status"></p>
+    <div class="link-container">
+      <input type="text" id="linkBox" readonly>
+      <button class="copy-button" id="copyButton"></button>
+    </div>
+  </div>
+  
   <div id="imageContainer">
     ${mediaTags}
   </div>
@@ -1110,13 +1230,161 @@ function renderHTML(mediaTags, host) {
   </div>
   
   <div class="custom-context-menu" id="customContextMenu" style="display: none;">
-      <button id="copyImage">이미지 복사</button>
-      <button id="copyImageurl">이미지 링크 복사</button>
+      <button id="copyImage">복사</button>
       <button id="downloadImage">다운로드</button>
-      <button id="downloadImagepng">png로 다운로드</button>
   </div>
   <script>
-    // 새로운 이미지 뷰어 기능
+    // 업로드 폼 관련 변수들
+    const fileSelectButton = document.getElementById('fileSelectButton');
+    const fileInput = document.getElementById('fileInput');
+    const fileNameDisplay = document.getElementById('fileNameDisplay');
+    const uploadButton = document.getElementById('uploadButton');
+    const statusElem = document.getElementById('status');
+    const linkBox = document.getElementById('linkBox');
+    const copyButton = document.getElementById('copyButton');
+    const customNameInput = document.getElementById('customNameInput');
+    const nameOptions = document.querySelectorAll('input[name="nameOption"]');
+
+    // 이름 옵션 라디오 버튼 처리
+    nameOptions.forEach(option => {
+      option.addEventListener('change', () => {
+        if (option.value === 'custom') {
+          customNameInput.classList.add('active');
+          if (fileInput.files.length === 1) {
+            const fileName = fileInput.files[0].name;
+            const baseName = fileName.substring(0, fileName.lastIndexOf('.'));
+            customNameInput.value = baseName;
+          }
+        } else {
+          customNameInput.classList.remove('active');
+        }
+      });
+    });
+
+    // 파일 선택 버튼 이벤트
+    fileSelectButton.addEventListener('click', () => {
+      fileInput.click();
+    });
+
+    // 파일 선택 시 파일명 업데이트
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length > 0) {
+        const names = Array.from(fileInput.files).map(f => f.name);
+        fileNameDisplay.textContent = names.join(', ');
+        
+        const customNameOption = document.querySelector('input[name="nameOption"][value="custom"]');
+        if (customNameOption.checked && fileInput.files.length === 1) {
+          const fileName = fileInput.files[0].name;
+          const baseName = fileName.substring(0, fileName.lastIndexOf('.'));
+          customNameInput.value = baseName;
+        }
+      } else {
+        fileNameDisplay.textContent = '파일 선택 안됨';
+      }
+    });
+
+    // 업로드 버튼 클릭 이벤트
+    uploadButton.addEventListener('click', async () => {
+      if (fileInput.files.length === 0) {
+        statusElem.textContent = '파일이 선택되지 않았습니다.';
+        return;
+      }
+      
+      const isCustomName = document.querySelector('input[name="nameOption"][value="custom"]').checked;
+      if (isCustomName && !customNameInput.value.trim()) {
+        statusElem.textContent = '사용자 지정 이름을 입력해주세요.';
+        customNameInput.focus();
+        return;
+      }
+      
+      statusElem.textContent = '검열 중...';
+      const formData = new FormData();
+      for (const file of fileInput.files) {
+        formData.append('file', file);
+      }
+      
+      if (isCustomName) {
+        formData.append('customName', customNameInput.value.trim());
+      }
+      
+      const timer = setTimeout(() => {
+        statusElem.textContent = '업로드 중...';
+      }, 2000);
+      
+      try {
+        const response = await fetch('/upload', {
+          method: 'POST',
+          body: formData
+        });
+        clearTimeout(timer);
+        const result = await response.json();
+        
+        if (result.success) {
+          linkBox.value = result.url;
+          statusElem.textContent = '업로드 성공';
+        } else {
+          if (result.rateLimited) {
+            const minutes = Math.floor(result.remainingTime / 60);
+            const seconds = result.remainingTime % 60;
+            const timeText = minutes > 0 ? \`\${minutes}분 \${seconds}초\` : \`\${seconds}초\`;
+            statusElem.textContent = \`⚠️ 보안 제한: \${timeText} 후 다시 시도하세요\`;
+            statusElem.style.color = '#ff6b6b';
+            
+            setTimeout(() => {
+              statusElem.style.color = '';
+            }, 5000);
+          } else {
+            statusElem.textContent = '업로드 실패: ' + (result.error || '알 수 없는 에러');
+          }
+        }
+      } catch (err) {
+        clearTimeout(timer);
+        statusElem.textContent = '업로드 중 오류 발생: ' + err.message;
+      }
+    });
+
+    // 복사 버튼 클릭 이벤트
+    copyButton.addEventListener('click', async () => {
+      if (linkBox.value) {
+        try {
+          await navigator.clipboard.writeText(linkBox.value);
+          statusElem.textContent = '링크가 복사되었습니다.';
+        } catch (err) {
+          statusElem.textContent = '복사 실패: ' + err.message;
+        }
+      }
+    });
+
+    // 클립보드에서 이미지 붙여넣기
+    document.addEventListener('paste', (event) => {
+      const clipboardItems = event.clipboardData.items;
+      let hasImage = false;
+      const dt = new DataTransfer();
+      
+      for (const file of fileInput.files) {
+        dt.items.add(file);
+      }
+      
+      for (let i = 0; i < clipboardItems.length; i++) {
+        const item = clipboardItems[i];
+        if (item.type && item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) {
+            dt.items.add(file);
+            hasImage = true;
+          }
+        }
+      }
+      
+      if (hasImage) {
+        fileInput.files = dt.files;
+        const names = Array.from(fileInput.files).map(f => f.name);
+        fileNameDisplay.textContent = names.join(', ');
+        statusElem.textContent = '클립보드에서 이미지 추가됨.';
+      }
+    });
+
+    // 이미지 뷰어 기능
     class ImageViewer {
       constructor() {
         this.modal = document.getElementById('imageModal');
@@ -1140,56 +1408,64 @@ function renderHTML(mediaTags, host) {
       }
       
       init() {
-        // 이벤트 리스너 등록
         this.closeBtn.addEventListener('click', () => this.closeModal());
         this.modal.addEventListener('click', (e) => {
           if (e.target === this.modal) this.closeModal();
         });
         
-        // 컨트롤 버튼 이벤트
         this.zoomInBtn.addEventListener('click', () => this.zoomIn());
         this.zoomOutBtn.addEventListener('click', () => this.zoomOut());
         this.rotateLeftBtn.addEventListener('click', () => this.rotateLeft());
         this.rotateRightBtn.addEventListener('click', () => this.rotateRight());
         this.resetBtn.addEventListener('click', () => this.resetView());
         
-                 // 마우스 드래그 이벤트
-         this.modalImage.addEventListener('mousedown', (e) => this.startDrag(e));
-         document.addEventListener('mousemove', (e) => this.drag(e));
-         document.addEventListener('mouseup', () => this.endDrag());
-         
-         // 터치 드래그 이벤트 (모바일)
-         this.modalImage.addEventListener('touchstart', (e) => this.startTouch(e));
-         document.addEventListener('touchmove', (e) => this.touchMove(e));
-         document.addEventListener('touchend', () => this.endDrag());
-         
-         // 브라우저 기본 드래그 및 더블탭 확대 방지
-         this.modalImage.addEventListener('dragstart', (e) => e.preventDefault());
-         this.modalImage.addEventListener('gesturestart', (e) => e.preventDefault());
-         this.modalImage.addEventListener('gesturechange', (e) => e.preventDefault());
-         this.modalImage.addEventListener('gestureend', (e) => e.preventDefault());
+        this.modalImage.addEventListener('mousedown', (e) => this.startDrag(e));
+        document.addEventListener('mousemove', (e) => this.drag(e));
+        document.addEventListener('mouseup', () => this.endDrag());
         
-        // 마우스 휠로 확대/축소
+        this.modalImage.addEventListener('touchstart', (e) => this.startTouch(e));
+        document.addEventListener('touchmove', (e) => this.touchMove(e));
+        document.addEventListener('touchend', () => this.endDrag());
+        
+        this.modalImage.addEventListener('dragstart', (e) => e.preventDefault());
         this.modalImage.addEventListener('wheel', (e) => this.handleWheel(e));
         
-        // ESC 키로 닫기
         document.addEventListener('keydown', (e) => {
           if (e.key === 'Escape' && this.modal.style.display === 'block') {
             this.closeModal();
           }
         });
         
-        // 이미지 클릭 이벤트 등록
         this.setupImageClickHandlers();
       }
       
       setupImageClickHandlers() {
+        const observer = new MutationObserver((mutations) => {
+          mutations.forEach((mutation) => {
+            mutation.addedNodes.forEach((node) => {
+              if (node.nodeType === 1) {
+                const images = node.querySelectorAll ? node.querySelectorAll('img') : [];
+                images.forEach(img => this.addClickHandler(img));
+                if (node.tagName === 'IMG') {
+                  this.addClickHandler(node);
+                }
+              }
+            });
+          });
+        });
+        
+        observer.observe(document.getElementById('imageContainer'), {
+          childList: true,
+          subtree: true
+        });
+        
         document.querySelectorAll('#imageContainer img').forEach(img => {
           this.addClickHandler(img);
         });
       }
       
       addClickHandler(img) {
+        img.removeAttribute('onclick');
         img.addEventListener('click', (e) => {
           e.preventDefault();
           this.openModal(img.src);
@@ -1236,51 +1512,51 @@ function renderHTML(mediaTags, host) {
         this.updateTransform();
       }
       
-             startDrag(e) {
-         if (this.scale > 1) {
-           this.isDragging = true;
-           this.startX = e.clientX - this.posX;
-           this.startY = e.clientY - this.posY;
-           this.modalImage.classList.add('dragging');
-           e.preventDefault();
-         }
-       }
-       
-       startTouch(e) {
-         if (this.scale > 1 && e.touches.length === 1) {
-           this.isDragging = true;
-           const touch = e.touches[0];
-           this.startX = touch.clientX - this.posX;
-           this.startY = touch.clientY - this.posY;
-           this.modalImage.classList.add('dragging');
-           e.preventDefault();
-         }
-       }
-       
-       drag(e) {
-         if (this.isDragging) {
-           this.posX = e.clientX - this.startX;
-           this.posY = e.clientY - this.startY;
-           this.updateTransform();
-         }
-       }
-       
-       touchMove(e) {
-         if (this.isDragging && e.touches.length === 1) {
-           const touch = e.touches[0];
-           this.posX = touch.clientX - this.startX;
-           this.posY = touch.clientY - this.startY;
-           this.updateTransform();
-           e.preventDefault();
-         }
-       }
-       
-       endDrag() {
-         if (this.isDragging) {
-           this.isDragging = false;
-           this.modalImage.classList.remove('dragging');
-         }
-       }
+      startDrag(e) {
+        if (this.scale > 1) {
+          this.isDragging = true;
+          this.startX = e.clientX - this.posX;
+          this.startY = e.clientY - this.posY;
+          this.modalImage.classList.add('dragging');
+          e.preventDefault();
+        }
+      }
+      
+      startTouch(e) {
+        if (this.scale > 1 && e.touches.length === 1) {
+          this.isDragging = true;
+          const touch = e.touches[0];
+          this.startX = touch.clientX - this.posX;
+          this.startY = touch.clientY - this.posY;
+          this.modalImage.classList.add('dragging');
+          e.preventDefault();
+        }
+      }
+      
+      drag(e) {
+        if (this.isDragging) {
+          this.posX = e.clientX - this.startX;
+          this.posY = e.clientY - this.startY;
+          this.updateTransform();
+        }
+      }
+      
+      touchMove(e) {
+        if (this.isDragging && e.touches.length === 1) {
+          const touch = e.touches[0];
+          this.posX = touch.clientX - this.startX;
+          this.posY = touch.clientY - this.startY;
+          this.updateTransform();
+          e.preventDefault();
+        }
+      }
+      
+      endDrag() {
+        if (this.isDragging) {
+          this.isDragging = false;
+          this.modalImage.classList.remove('dragging');
+        }
+      }
       
       handleWheel(e) {
         e.preventDefault();
@@ -1296,99 +1572,56 @@ function renderHTML(mediaTags, host) {
         this.modalImage.style.transform = transform;
       }
     }
-    
-    // 이미지 뷰어 초기화
-    document.addEventListener('DOMContentLoaded', () => {
-      new ImageViewer();
-    });
-    
-    document.getElementById('toggleButton')?.addEventListener('click',function(){
-      window.location.href='/';
-    });
-    
-    // Custom Context Menu Functionality
+
+    // 컨텍스트 메뉴 기능
     let currentImage = null;
     const contextMenu = document.getElementById('customContextMenu');
 
     document.getElementById('imageContainer').addEventListener('contextmenu', function(e) {
-        if(e.target.tagName.toLowerCase() === 'img'){
-            e.preventDefault();
-            currentImage = e.target;
-            contextMenu.style.top = e.pageY + 'px';
-            contextMenu.style.left = e.pageX + 'px';
-            contextMenu.style.display = 'block';
-        }
+      if(e.target.tagName.toLowerCase() === 'img'){
+        e.preventDefault();
+        currentImage = e.target;
+        contextMenu.style.top = e.pageY + 'px';
+        contextMenu.style.left = e.pageX + 'px';
+        contextMenu.style.display = 'block';
+      }
     });
 
-    // Hide context menu on document click
     document.addEventListener('click', function(e) {
-        if(contextMenu.style.display === 'block'){
-            contextMenu.style.display = 'none';
-        }
+      if(contextMenu.style.display === 'block'){
+        contextMenu.style.display = 'none';
+      }
     });
 
-    // "이미지 복사" 버튼 클릭
     document.getElementById('copyImage').addEventListener('click', async function(){
-        if(currentImage){
-            try {
-                const response = await fetch(currentImage.src);
-                const blob = await response.blob();
-                await navigator.clipboard.write([
-                    new ClipboardItem({ [blob.type]: blob })
-                ]);
-                alert('이미지 복사됨');
-            } catch(err) {
-                alert('이미지 복사 실패: ' + err.message);
-            }
+      if(currentImage){
+        try {
+          const response = await fetch(currentImage.src);
+          const blob = await response.blob();
+          await navigator.clipboard.write([
+            new ClipboardItem({ [blob.type]: blob })
+          ]);
+          alert('이미지 복사됨');
+        } catch(err) {
+          alert('이미지 복사 실패: ' + err.message);
         }
+      }
     });
 
-    // "이미지 링크 복사" 버튼 클릭
-    document.getElementById('copyImageurl').addEventListener('click', async function(){
-        if(currentImage){
-            try {
-                await navigator.clipboard.writeText(currentImage.src);
-                alert('이미지 링크 복사됨');
-            } catch(err) {
-                alert('이미지 링크 복사 실패: ' + err.message);
-            }
-        }
-    });
-
-    // "다운로드" 버튼 클릭 (원본 이미지 다운로드)
     document.getElementById('downloadImage').addEventListener('click', function(){
-        if(currentImage){
-            const a = document.createElement('a');
-            a.href = currentImage.src;
-            a.download = 'image';
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-        }
+      if(currentImage){
+        const a = document.createElement('a');
+        a.href = currentImage.src;
+        a.download = 'image';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
     });
 
-    // "png로 다운로드" 버튼 클릭 (이미지를 png로 변환하여 다운로드)
-    document.getElementById('downloadImagepng').addEventListener('click', function(){
-        if(currentImage){
-            const canvas = document.createElement('canvas');
-            const img = new Image();
-            img.crossOrigin = "anonymous";
-            img.onload = function(){
-                canvas.width = img.naturalWidth;
-                canvas.height = img.naturalHeight;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0);
-                canvas.toBlob(function(blob){
-                    const a = document.createElement('a');
-                    a.href = URL.createObjectURL(blob);
-                    a.download = 'image.png';
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                }, 'image/png');
-            };
-            img.src = currentImage.src;
-        }
+    // 초기화
+    document.addEventListener('DOMContentLoaded', () => {
+      new ImageViewer();
     });
   </script>
 </body>
