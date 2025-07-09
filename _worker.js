@@ -248,6 +248,28 @@ export default {
         headers: { 'Content-Type': 'text/html; charset=UTF-8' }
       });
     }
+    
+    // 4) [GET] /debug => 디버깅 정보 제공 (검열 시스템 상태 확인)
+    else if (request.method === 'GET' && path === '/debug') {
+      const debugInfo = {
+        timestamp: new Date().toISOString(),
+        geminiApiKey: {
+          exists: !!env.GEMINI_API_KEY,
+          length: env.GEMINI_API_KEY ? env.GEMINI_API_KEY.length : 0,
+          preview: env.GEMINI_API_KEY ? env.GEMINI_API_KEY.substring(0, 10) + '...' : 'NOT_SET'
+        },
+        rateLimitData: {
+          activeIPs: rateLimitData.size,
+          blockedIPs: blockedIPs.size
+        },
+        requestsInProgress: Object.keys(requestsInProgress).length,
+        systemStatus: 'OPERATIONAL'
+      };
+      
+      return new Response(JSON.stringify(debugInfo, null, 2), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
 
     // 4) [GET] /{코드 또는 커스텀 이름} => R2 파일 or HTML
     else if (request.method === 'GET' && url.pathname.length > 1) {
@@ -539,15 +561,30 @@ async function handleUpload(request, env) {
 // 이미지 검열 - Gemini API 사용 (대용량 파일 최적화)
 async function handleImageCensorship(file, env) {
   try {
+    console.log(`[이미지 검열 시작] 파일: ${file.name}, 타입: ${file.type}`);
+    
     const buf = await file.arrayBuffer();
     const base64 = arrayBufferToBase64(buf);
     const geminiApiKey = env.GEMINI_API_KEY;
+    
+    // API 키 체크 강화
     if (!geminiApiKey) {
+      console.error(`[치명적 오류] GEMINI_API_KEY가 설정되지 않았습니다!`);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
+    
+    if (geminiApiKey.length < 20) {
+      console.error(`[치명적 오류] GEMINI_API_KEY가 너무 짧습니다: ${geminiApiKey.length}자`);
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: 'Gemini API 키가 올바르지 않습니다.'
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      };
+    }
+    
+    console.log(`[이미지 검열] API 키 확인됨: ${geminiApiKey.substring(0, 10)}...`);
 
     let imageBase64 = base64;
     let fileSizeMB = buf.byteLength / (1024 * 1024);
@@ -675,15 +712,26 @@ async function handleImageCensorship(file, env) {
       }
     };
 
+    console.log(`[이미지 검열] Gemini API 호출 시작...`);
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
+    
     if (!analysis.success) {
+      console.error(`[이미지 검열] Gemini API 호출 실패: ${analysis.error}`);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: `Gemini API 호출 오류: ${analysis.error}`
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
+    
+    console.log(`[이미지 검열] Gemini API 응답 길이: ${analysis.text.length}자`);
+    console.log(`[이미지 검열] Gemini API 응답 내용:`, analysis.text);
 
     const bad = isInappropriateContent(analysis.text);
+    console.log(`[이미지 검열] 분석 결과: ${bad.isInappropriate ? '부적절' : '적절'}, 감지된 카테고리: ${bad.reasons.length}개`);
+    
+    if (bad.reasons.length > 0) {
+      console.log(`[이미지 검열] 감지된 카테고리 목록:`, bad.reasons);
+    }
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
     if (bad.isInappropriate && bad.reasons.length >= 4) {
@@ -713,6 +761,8 @@ async function handleImageCensorship(file, env) {
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
         return { ok: true };
+      } else {
+        console.log(`[재검토 결과] 부적절한 콘텐츠로 최종 판정`);
       }
     }
     
@@ -723,11 +773,14 @@ async function handleImageCensorship(file, env) {
         }), { status: 400, headers: { 'Content-Type': 'application/json' } })
       };
     }
+    
+    console.log(`[검열 완료] 적절한 콘텐츠로 판정, 업로드 허용`);
     return { ok: true };
   } catch (e) {
-    console.log("handleImageCensorship error:", e);
+    console.error("handleImageCensorship 치명적 오류:", e);
+    // 검열 실패 시 안전장치: 업로드 차단
     return { ok: false, response: new Response(JSON.stringify({
-        success: false, error: `이미지 검열 중 오류 발생: ${e.message}`
+        success: false, error: `이미지 검열 중 오류 발생: ${e.message}. 보안상 업로드가 차단됩니다.`
       }), { status: 500, headers: { 'Content-Type': 'application/json' } })
     };
   }
@@ -736,16 +789,31 @@ async function handleImageCensorship(file, env) {
 // 동영상 검열 - Gemini Video 파일 업로드 API 사용 (대용량 파일 최적화)
 async function handleVideoCensorship(file, env) {
   try {
+    console.log(`[비디오 검열 시작] 파일: ${file.name}, 타입: ${file.type}`);
+    
     const fileSizeMB = file.size / (1024 * 1024);
     console.log(`[비디오 검열] 파일 크기: ${fileSizeMB.toFixed(2)}MB`);
     
     const geminiApiKey = env.GEMINI_API_KEY;
+    
+    // API 키 체크 강화
     if (!geminiApiKey) {
+      console.error(`[치명적 오류] GEMINI_API_KEY가 설정되지 않았습니다!`);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
+    
+    if (geminiApiKey.length < 20) {
+      console.error(`[치명적 오류] GEMINI_API_KEY가 너무 짧습니다: ${geminiApiKey.length}자`);
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: 'Gemini API 키가 올바르지 않습니다.'
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      };
+    }
+    
+    console.log(`[비디오 검열] API 키 확인됨: ${geminiApiKey.substring(0, 10)}...`);
 
     // 대용량 파일 처리 최적화: 더 긴 타임아웃과 재시도 로직
     const maxRetries = fileSizeMB > 100 ? 5 : 3;
@@ -967,12 +1035,23 @@ async function handleVideoCensorship(file, env) {
       }
     };
     
+    console.log(`[비디오 검열] Gemini API 호출 시작...`);
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
+    
     if (!analysis.success) {
+      console.error(`[비디오 검열] Gemini API 호출 실패: ${analysis.error}`);
       throw new Error(analysis.error);
     }
     
+    console.log(`[비디오 검열] Gemini API 응답 길이: ${analysis.text.length}자`);
+    console.log(`[비디오 검열] Gemini API 응답 내용:`, analysis.text);
+    
     const bad = isInappropriateContent(analysis.text);
+    console.log(`[비디오 검열] 분석 결과: ${bad.isInappropriate ? '부적절' : '적절'}, 감지된 카테고리: ${bad.reasons.length}개`);
+    
+    if (bad.reasons.length > 0) {
+      console.log(`[비디오 검열] 감지된 카테고리 목록:`, bad.reasons);
+    }
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
     if (bad.isInappropriate && bad.reasons.length >= 4) {
@@ -1002,6 +1081,8 @@ async function handleVideoCensorship(file, env) {
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
         return { ok: true };
+      } else {
+        console.log(`[비디오 재검토 결과] 부적절한 콘텐츠로 최종 판정`);
       }
     }
     
@@ -1012,11 +1093,13 @@ async function handleVideoCensorship(file, env) {
         }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
     }
     
+    console.log(`[비디오 검열 완료] 적절한 콘텐츠로 판정, 업로드 허용`);
     return { ok: true };
   } catch (e) {
-    console.log('handleVideoCensorship 오류:', e);
+    console.error('handleVideoCensorship 치명적 오류:', e);
+    // 검열 실패 시 안전장치: 업로드 차단
     return { ok: false, response: new Response(JSON.stringify({
-        success: false, error: `동영상 검열 중 오류 발생: ${e.message}`
+        success: false, error: `동영상 검열 중 오류 발생: ${e.message}. 보안상 업로드가 차단됩니다.`
       }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
   }
 }
@@ -1175,6 +1258,8 @@ async function callGeminiAPI(apiKey, requestBody) {
 // 부적절한 내용 분석 함수 (강화된 버전)
 // =======================
 function isInappropriateContent(responseText) {
+  console.log(`[검열 분석] 응답 텍스트 분석 시작 (길이: ${responseText.length}자)`);
+  
   // 카테고리 인덱스 → 사용자 표시용 이름 매핑 (한국어)
   const categoryMap = {
     1: '성적/노출 콘텐츠',
@@ -1193,30 +1278,39 @@ function isInappropriateContent(responseText) {
 
   // 결과 저장소
   const flagged = [];
+  let totalChecked = 0;
 
   // 응답을 줄별로 순회하며 다양한 패턴 파싱
-  responseText.split(/\r?\n/).forEach((line, lineIndex) => {
+  const lines = responseText.split(/\r?\n/);
+  console.log(`[검열 분석] 총 ${lines.length}개 줄 분석`);
+  
+  lines.forEach((line, lineIndex) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) return;
+    
+    console.log(`[검열 분석] 줄 ${lineIndex + 1}: "${trimmedLine}"`);
+    
     // 패턴 1: "숫자. true/false" 형태
-    let m = line.match(/^\s*([1-9]|1[0-2])\.\s*(true|false)\b/i);
+    let m = trimmedLine.match(/^\s*([1-9]|1[0-2])\.\s*(true|false)\b/i);
     if (!m) {
       // 패턴 2: "숫자: true/false" 형태
-      m = line.match(/^\s*([1-9]|1[0-2]):\s*(true|false)\b/i);
+      m = trimmedLine.match(/^\s*([1-9]|1[0-2]):\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 3: "숫자 - true/false" 형태
-      m = line.match(/^\s*([1-9]|1[0-2])\s*[-–]\s*(true|false)\b/i);
+      m = trimmedLine.match(/^\s*([1-9]|1[0-2])\s*[-–]\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 4: "숫자) true/false" 형태
-      m = line.match(/^\s*([1-9]|1[0-2])\)\s*(true|false)\b/i);
+      m = trimmedLine.match(/^\s*([1-9]|1[0-2])\)\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 5: 단순히 "true" 또는 "false"만 있는 경우 (순서대로 1-12 매핑)
-      const trueMatch = line.match(/^\s*(true|false)\b/i);
+      const trueMatch = trimmedLine.match(/^\s*(true|false)\b/i);
       if (trueMatch) {
         // 실제 내용이 있는 줄들만 카운트
-        const contentLines = responseText.split(/\r?\n/).filter(l => l.trim().match(/^\s*(true|false)\b/i));
-        const contentLineIndex = contentLines.indexOf(line.trim());
+        const contentLines = lines.filter(l => l.trim().match(/^\s*(true|false)\b/i));
+        const contentLineIndex = contentLines.indexOf(trimmedLine);
         if (contentLineIndex >= 0 && contentLineIndex < 12) {
           m = [null, (contentLineIndex + 1).toString(), trueMatch[1]];
         }
@@ -1226,16 +1320,56 @@ function isInappropriateContent(responseText) {
     if (m) {
       const idx = Number(m[1]);
       const val = m[2].toLowerCase() === 'true';
+      totalChecked++;
+      
+      console.log(`[검열 분석] 카테고리 ${idx} (${categoryMap[idx]}): ${val ? 'TRUE' : 'FALSE'}`);
+      
       if (val && categoryMap[idx]) {
         flagged.push(categoryMap[idx]);
       }
+    } else {
+      console.log(`[검열 분석] 패턴 매칭 실패: "${trimmedLine}"`);
     }
   });
 
-  return {
+  console.log(`[검열 분석] 총 ${totalChecked}개 카테고리 확인, ${flagged.length}개 부적절 감지`);
+  
+  // 안전장치: 전혀 파싱되지 않은 경우 의심스러운 상황으로 판단
+  if (totalChecked === 0) {
+    console.warn(`[검열 분석] 경고: 아무것도 파싱되지 않음. 응답 내용 재확인 필요.`);
+    console.warn(`[검열 분석] 전체 응답:`, responseText);
+    
+    // 응답에 명시적으로 "appropriate" 또는 "safe" 같은 단어가 있으면 허용
+    const safeWords = ['appropriate', 'safe', 'acceptable', 'legitimate', 'normal'];
+    const inappropriateWords = ['inappropriate', 'unsafe', 'offensive', 'explicit', 'sexual', 'violent'];
+    
+    const lowerResponse = responseText.toLowerCase();
+    const hasSafeWords = safeWords.some(word => lowerResponse.includes(word));
+    const hasInappropriateWords = inappropriateWords.some(word => lowerResponse.includes(word));
+    
+    console.log(`[검열 분석] 키워드 검색 - 안전: ${hasSafeWords}, 부적절: ${hasInappropriateWords}`);
+    
+    if (hasInappropriateWords && !hasSafeWords) {
+      console.warn(`[검열 분석] 부적절한 키워드 감지로 차단 처리`);
+      return {
+        isInappropriate: true,
+        reasons: ['응답 파싱 실패 - 부적절한 키워드 감지']
+      };
+    }
+  }
+  
+  // 최종 결과 로깅
+  const result = {
     isInappropriate: flagged.length > 0,
     reasons: flagged
   };
+  
+  console.log(`[검열 분석] 최종 결과: ${result.isInappropriate ? '부적절' : '적절'}`);
+  if (result.reasons.length > 0) {
+    console.log(`[검열 분석] 부적절한 카테고리:`, result.reasons);
+  }
+  
+  return result;
 }
 
 // MP4 재생길이 간단 추출 함수
