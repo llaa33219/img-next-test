@@ -248,28 +248,6 @@ export default {
         headers: { 'Content-Type': 'text/html; charset=UTF-8' }
       });
     }
-    
-    // 4) [GET] /debug => 디버깅 정보 제공 (검열 시스템 상태 확인)
-    else if (request.method === 'GET' && path === '/debug') {
-      const debugInfo = {
-        timestamp: new Date().toISOString(),
-        geminiApiKey: {
-          exists: !!env.GEMINI_API_KEY,
-          length: env.GEMINI_API_KEY ? env.GEMINI_API_KEY.length : 0,
-          preview: env.GEMINI_API_KEY ? env.GEMINI_API_KEY.substring(0, 10) + '...' : 'NOT_SET'
-        },
-        rateLimitData: {
-          activeIPs: rateLimitData.size,
-          blockedIPs: blockedIPs.size
-        },
-        requestsInProgress: Object.keys(requestsInProgress).length,
-        systemStatus: 'OPERATIONAL'
-      };
-      
-      return new Response(JSON.stringify(debugInfo, null, 2), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
 
     // 4) [GET] /{코드 또는 커스텀 이름} => R2 파일 or HTML
     else if (request.method === 'GET' && url.pathname.length > 1) {
@@ -327,7 +305,7 @@ export default {
   }
 };
 
-// 메인 업로드 처리 함수 (대용량 파일 최적화)
+// 메인 업로드 처리 함수
 async function handleUpload(request, env) {
   const formData = await request.formData();
   const files = formData.getAll('file');
@@ -340,154 +318,71 @@ async function handleUpload(request, env) {
     });
   }
 
-  // 파일 크기 및 형식 검사 (대용량 파일 지원)
-  const allowedImageTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
-  const allowedVideoTypes = ["video/mp4", "video/webm", "video/ogg", "video/x-msvideo", "video/avi", "video/msvideo"];
-  const maxFileSize = 2 * 1024 * 1024 * 1024; // 2GB (Gemini API 제한)
-  const maxTotalSize = 5 * 1024 * 1024 * 1024; // 전체 5GB 제한
+  // 파일 크기 제한 검사 (2GB = 2 * 1024 * 1024 * 1024 bytes)
+  const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2GB
+  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
   
-  let totalSize = 0;
-  let largeFileCount = 0;
+  console.log(`[업로드 요청] 총 파일 수: ${files.length}, 총 크기: ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
   
-  for (const file of files) {
-    const fileSizeMB = file.size / (1024 * 1024);
-    totalSize += file.size;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const fileSizeMB = (file.size / 1024 / 1024).toFixed(2);
+    console.log(`[파일 ${i + 1}] 타입: ${file.type}, 크기: ${fileSizeMB}MB`);
     
-    console.log(`[파일 검사] ${file.name}: ${fileSizeMB.toFixed(2)}MB, 타입: ${file.type}`);
-    
-    // 개별 파일 크기 체크
-    if (file.size > maxFileSize) {
+    if (file.size > MAX_FILE_SIZE) {
       return new Response(JSON.stringify({ 
         success: false, 
-        error: `파일 "${file.name}"이 너무 큽니다. 최대 2GB까지 지원됩니다. (현재: ${fileSizeMB.toFixed(2)}MB)` 
+        error: `파일 크기가 너무 큽니다. 최대 2GB까지 지원됩니다. (현재 파일: ${fileSizeMB}MB)` 
       }), {
-        status: 400, headers: { 'Content-Type': 'application/json' }
+        status: 400, 
+        headers: { 'Content-Type': 'application/json' }
       });
     }
-    
-    // 대용량 파일 카운트 (50MB 이상)
-    if (fileSizeMB > 50) {
-      largeFileCount++;
-    }
-    
-    // 파일 형식 검사
+  }
+
+  const allowedImageTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+  const allowedVideoTypes = ["video/mp4", "video/webm", "video/ogg", "video/x-msvideo", "video/avi", "video/msvideo"];
+  for (const file of files) {
     if (file.type.startsWith('image/')) {
       if (!allowedImageTypes.includes(file.type)) {
-        return new Response(JSON.stringify({ 
-          success: false, 
-          error: `"${file.name}"은 지원하지 않는 이미지 형식입니다. 지원 형식: JPEG, PNG, GIF, WEBP` 
-        }), {
+        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 이미지 형식입니다.' }), {
           status: 400, headers: { 'Content-Type': 'application/json' }
         });
       }
     } else if (file.type.startsWith('video/')) {
       if (!allowedVideoTypes.includes(file.type)) {
-        return new Response(JSON.stringify({ 
-          success: false, 
-          error: `"${file.name}"은 지원하지 않는 동영상 형식입니다. 지원 형식: MP4, WEBM, OGG, AVI` 
-        }), {
+        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 동영상 형식입니다.' }), {
           status: 400, headers: { 'Content-Type': 'application/json' }
         });
       }
     } else {
-      return new Response(JSON.stringify({ 
-        success: false, 
-        error: `"${file.name}"은 지원하지 않는 파일 형식입니다. 이미지 또는 동영상 파일만 업로드할 수 있습니다.` 
-      }), {
-        status: 400, headers: { 'Content-Type': 'application/json' } 
-      });
+      return new Response(JSON.stringify({ success: false, error: '지원하지 않는 파일 형식입니다.' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' } });
     }
   }
 
-  // 전체 파일 크기 체크
-  if (totalSize > maxTotalSize) {
-    return new Response(JSON.stringify({ 
-      success: false, 
-      error: `전체 파일 크기가 너무 큽니다. 최대 5GB까지 지원됩니다. (현재: ${(totalSize / (1024 * 1024 * 1024)).toFixed(2)}GB)` 
-    }), {
-      status: 400, headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  // 대용량 파일 경고 로그
-  if (largeFileCount > 0) {
-    console.log(`[대용량 파일 감지] ${largeFileCount}개의 대용량 파일 (50MB+) 감지. 처리 시간이 오래 걸릴 수 있습니다.`);
-  }
-
-  // 1) 검열 (대용량 파일 최적화)
+  // 1) 검열
   try {
-    console.log(`[검열 시작] ${files.length}개 파일 검열 시작 (총 ${(totalSize / (1024 * 1024)).toFixed(2)}MB)`);
-    
-    // 대용량 파일이 있는 경우 순차 처리 (동시 처리 시 메모리 부족 방지)
-    const shouldProcessSequentially = largeFileCount > 0 || totalSize > 100 * 1024 * 1024; // 100MB 이상
-    
-    if (shouldProcessSequentially) {
-      console.log(`[검열 모드] 순차 처리 모드 (대용량 파일 ${largeFileCount}개)`);
+    console.log(`[검열 시작] ${files.length}개 파일 검열 시작`);
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const fileSizeMB = (file.size / 1024 / 1024).toFixed(2);
+      console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.type}, ${fileSizeMB}MB`);
       
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const fileSizeMB = file.size / (1024 * 1024);
-        console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.name} (${fileSizeMB.toFixed(2)}MB)`);
+      // 모든 파일 Files API 사용
+      console.log(`[파일 처리] Files API 사용 예정`);
+      
+      const r = file.type.startsWith('image/')
+        ? await handleImageCensorship(file, env)
+        : await handleVideoCensorship(file, env);
         
-        const r = file.type.startsWith('image/')
-          ? await handleImageCensorship(file, env)
-          : await handleVideoCensorship(file, env);
-          
-        if (!r.ok) {
-          console.log(`[검열 실패] ${i + 1}번째 파일 "${file.name}"에서 검열 실패`);
-          return r.response;
-        } else {
-          console.log(`[검열 통과] ${i + 1}번째 파일 "${file.name}" 검열 통과`);
-        }
-      }
-    } else {
-      console.log(`[검열 모드] 병렬 처리 모드`);
-      
-      // 기존 병렬 처리 방식
-      const censorshipPromises = files.map(async (file, index) => {
-        const fileSizeMB = file.size / (1024 * 1024);
-        console.log(`[검열 진행] ${index + 1}/${files.length} - ${file.name} (${fileSizeMB.toFixed(2)}MB)`);
-        
-        try {
-          const r = file.type.startsWith('image/')
-            ? await handleImageCensorship(file, env)
-            : await handleVideoCensorship(file, env);
-            
-          if (!r.ok) {
-            console.log(`[검열 실패] ${index + 1}번째 파일 "${file.name}"에서 검열 실패`);
-            // 구체적인 실패 이유를 포함한 에러 반환
-            const errorMessage = r.response ? await r.response.text() : '알 수 없는 오류';
-            let errorDetail = '검열 실패';
-            try {
-              const errorJson = JSON.parse(errorMessage);
-              errorDetail = errorJson.error || errorDetail;
-            } catch (e) {
-              // JSON 파싱 실패 시 원본 메시지 사용
-              errorDetail = errorMessage.substring(0, 200); // 너무 길면 자르기
-            }
-            throw new Error(`검열 실패 (${file.name}): ${errorDetail}`);
-          } else {
-            console.log(`[검열 통과] ${index + 1}번째 파일 "${file.name}" 검열 통과`);
-          }
-          
-          return r;
-        } catch (e) {
-          console.error(`[검열 오류] ${index + 1}번째 파일 "${file.name}" 처리 중 예외:`, e);
-          throw new Error(`검열 처리 오류 (${file.name}): ${e.message}`);
-        }
-      });
-      
-      try {
-        await Promise.all(censorshipPromises);
-      } catch (e) {
-        console.error(`[병렬 검열 실패] 전체 검열 프로세스 실패:`, e.message);
-        return new Response(JSON.stringify({
-          success: false,
-          error: `검열 처리 중 오류: ${e.message}`
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      if (!r.ok) {
+        console.log(`[검열 실패] ${i + 1}번째 파일에서 검열 실패`);
+        return r.response;
+      } else {
+        console.log(`[검열 통과] ${i + 1}번째 파일 검열 통과`);
       }
     }
-    
     console.log(`[검열 완료] 모든 파일(${files.length}개) 검열 통과`);
   } catch (e) {
     console.log("검열 과정에서 예상치 못한 오류 발생:", e);
@@ -497,10 +392,10 @@ async function handleUpload(request, env) {
     }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
 
-  // 2) R2 업로드 (대용량 파일 최적화)
-  console.log(`[R2 업로드] 시작 - ${files.length}개 파일`);
-  
+  // 2) R2 업로드
   let codes = [];
+  console.log(`[R2 업로드] 시작`);
+  
   if (customName && files.length === 1) {
     customName = customName.replace(/ /g, "_");
     if (await env.IMAGES.get(customName)) {
@@ -509,244 +404,156 @@ async function handleUpload(request, env) {
         error: '이미 사용 중인 이름입니다. 다른 이름을 선택해주세요.'
       }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
-    
     const buffer = await files[0].arrayBuffer();
-    console.log(`[R2 업로드] 커스텀 이름 "${customName}"으로 업로드 중...`);
-    
     await env.IMAGES.put(customName, buffer, {
       httpMetadata: { contentType: files[0].type }
     });
     codes.push(customName);
+    console.log(`[R2 업로드] 커스텀 이름으로 업로드: ${customName}`);
   } else {
-    // 대용량 파일의 경우 순차 업로드 (메모리 효율성)
-    const shouldUploadSequentially = largeFileCount > 0 || totalSize > 200 * 1024 * 1024; // 200MB 이상
-    
-    if (shouldUploadSequentially) {
-      console.log(`[R2 업로드] 순차 업로드 모드`);
-      
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const code = await generateUniqueCode(env);
-        const buffer = await file.arrayBuffer();
-        
-        console.log(`[R2 업로드] ${i + 1}/${files.length} - ${code} (${(buffer.byteLength / (1024 * 1024)).toFixed(2)}MB)`);
-        
-        await env.IMAGES.put(code, buffer, {
-          httpMetadata: { contentType: file.type }
-        });
-        codes.push(code);
-      }
-    } else {
-      console.log(`[R2 업로드] 병렬 업로드 모드`);
-      
-      // 기존 병렬 업로드 방식
-      const uploadPromises = files.map(async (file, index) => {
-        const code = await generateUniqueCode(env);
-        const buffer = await file.arrayBuffer();
-        
-        console.log(`[R2 업로드] ${index + 1}/${files.length} - ${code} (${(buffer.byteLength / (1024 * 1024)).toFixed(2)}MB)`);
-        
-        await env.IMAGES.put(code, buffer, {
-          httpMetadata: { contentType: file.type }
-        });
-        return code;
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const code = await generateUniqueCode(env);
+      const buffer = await file.arrayBuffer();
+      await env.IMAGES.put(code, buffer, {
+        httpMetadata: { contentType: file.type }
       });
-      
-      codes = await Promise.all(uploadPromises);
+      codes.push(code);
+      console.log(`[R2 업로드] ${i + 1}/${files.length} - ${code}`);
     }
   }
 
   const host = request.headers.get('host') || 'example.com';
   const finalUrl = `https://${host}/${codes.join(",")}`;
   const rawUrls = codes.map(code => `https://${host}/${code}?raw=1`);
-  
-  console.log(`[업로드 완료] ${codes.length}개 파일 업로드 완료 =>`, finalUrl);
+  console.log(">>> 업로드 완료 =>", finalUrl);
 
-  // API 응답에 추가 정보 포함 (대용량 파일 처리 정보)
+  // API 응답에 추가 정보 포함
   return new Response(JSON.stringify({ 
     success: true, 
     url: finalUrl,
     rawUrls: rawUrls,
     codes: codes,
     fileTypes: files.map(file => file.type),
-    fileSizes: files.map(file => file.size),
-    totalSize: totalSize,
-    processingInfo: {
-      largeFileCount: largeFileCount,
-      totalSizeMB: (totalSize / (1024 * 1024)).toFixed(2),
-      processedSequentially: largeFileCount > 0 || totalSize > 100 * 1024 * 1024
-    }
+    totalFiles: files.length,
+    totalSizeMB: (totalSize / 1024 / 1024).toFixed(2)
   }), {
     headers: { 'Content-Type': 'application/json' }
   });
 }
 
-// 이미지 검열 - Gemini API 사용 (대용량 파일 최적화)
+// 이미지 검열 - 모든 파일 Files API 사용
 async function handleImageCensorship(file, env) {
   try {
-    console.log(`[이미지 검열 시작] 파일: ${file.name}, 타입: ${file.type}, 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
-    
-    // 파일 유효성 검사
-    if (!file || !file.type || !file.size) {
-      const error = '파일 정보가 불완전합니다.';
-      console.error(`[이미지 검열] ${error}`, { name: file?.name, type: file?.type, size: file?.size });
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: error
-        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
-      };
-    }
-    
-    // 이미지 타입 재확인
-    if (!file.type.startsWith('image/')) {
-      const error = `이미지가 아닌 파일입니다: ${file.type}`;
-      console.error(`[이미지 검열] ${error}`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: error
-        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
-      };
-    }
-    
-    let buf;
-    try {
-      buf = await file.arrayBuffer();
-      console.log(`[이미지 검열] 파일 읽기 완료: ${buf.byteLength} bytes`);
-    } catch (e) {
-      const error = `파일 읽기 실패: ${e.message}`;
-      console.error(`[이미지 검열] ${error}`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: error
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
-      };
-    }
-    
-    let base64;
-    try {
-      base64 = arrayBufferToBase64(buf);
-      console.log(`[이미지 검열] Base64 변환 완료: ${base64.length} 문자`);
-    } catch (e) {
-      const error = `Base64 변환 실패: ${e.message}`;
-      console.error(`[이미지 검열] ${error}`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: error
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
-      };
-    }
-    
+    console.log(`[이미지 검열] 파일 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB - Files API 사용`);
     const geminiApiKey = env.GEMINI_API_KEY;
-    
-    // API 키 체크 강화
     if (!geminiApiKey) {
-      console.error(`[치명적 오류] GEMINI_API_KEY가 설정되지 않았습니다!`);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
+
+    // 모든 파일에 대해 Files API 사용
+    return await handleImageCensorshipWithFilesAPI(file, env, geminiApiKey);
+  } catch (e) {
+    console.log("handleImageCensorship error:", e);
+    return { ok: false, response: new Response(JSON.stringify({
+        success: false, error: `이미지 검열 중 오류 발생: ${e.message}`
+      }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+    };
+  }
+}
+
+// Files API를 사용한 이미지 검열 (모든 파일용)
+async function handleImageCensorshipWithFilesAPI(file, env, geminiApiKey) {
+  try {
+    // 1) Resumable upload 시작
+    const startResp = await fetch(
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
+      { method: 'POST',
+        headers: {
+          'X-Goog-Upload-Protocol': 'resumable',
+          'X-Goog-Upload-Command': 'start',
+          'X-Goog-Upload-Header-Content-Length': file.size,
+          'X-Goog-Upload-Header-Content-Type': file.type,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ file: { display_name: 'image_upload' } })
+      }
+    );
     
-    if (geminiApiKey.length < 20) {
-      console.error(`[치명적 오류] GEMINI_API_KEY가 너무 짧습니다: ${geminiApiKey.length}자`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'Gemini API 키가 올바르지 않습니다.'
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
-      };
+    if (!startResp.ok) {
+      const err = await startResp.text();
+      throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
     }
     
-    console.log(`[이미지 검열] API 키 확인됨: ${geminiApiKey.substring(0, 10)}...`);
-
-    let imageBase64 = base64;
-    let fileSizeMB = buf.byteLength / (1024 * 1024);
+    let uploadUrl = startResp.headers.get('X-Goog-Upload-URL') || startResp.headers.get('Location');
     
-    console.log(`[이미지 검열] 원본 파일 크기: ${fileSizeMB.toFixed(2)}MB`);
-    
-    // 대용량 파일 처리 최적화: 10MB 이하가 될 때까지 반복 리사이징
-    if (fileSizeMB > 1) { // 1MB 이상이면 리사이징
-      try {
-        console.log(`[이미지 리사이징] ${fileSizeMB.toFixed(2)}MB 파일 리사이징 시작`);
-        
-        let currentBase64 = base64;
-        let currentSize = fileSizeMB;
-        let attempt = 0;
-        const maxAttempts = 10; // 최대 10번 시도
-        
-        while (currentSize > 10 && attempt < maxAttempts) {
-          attempt++;
-          
-          // 파일 크기에 따라 더 적극적인 리사이징 전략
-          let maxWidth, maxHeight, quality;
-          
-          if (currentSize > 100) {
-            maxWidth = 400;
-            maxHeight = 400;
-            quality = 60;
-          } else if (currentSize > 50) {
-            maxWidth = 512;
-            maxHeight = 512;
-            quality = 65;
-          } else if (currentSize > 30) {
-            maxWidth = 600;
-            maxHeight = 600;
-            quality = 70;
-          } else if (currentSize > 20) {
-            maxWidth = 800;
-            maxHeight = 800;
-            quality = 75;
-          } else if (currentSize > 10) {
-            maxWidth = 1000;
-            maxHeight = 1000;
-            quality = 80;
-          } else {
-            break; // 10MB 이하면 중단
-          }
-          
-          console.log(`[이미지 리사이징] 시도 ${attempt}/${maxAttempts} - 목표: ${maxWidth}x${maxHeight}, 품질: ${quality}%`);
-          
-          const dataUrl = `data:${file.type};base64,${currentBase64}`;
-          const resizedResp = await fetch(new Request(dataUrl, {
-            cf: { 
-              image: { 
-                width: maxWidth, 
-                height: maxHeight, 
-                fit: "scale-down", // 비율 유지하면서 축소
-                quality: quality
-              } 
-            }
-          }));
-          
-          if (resizedResp.ok) {
-            const resizedBuf = await resizedResp.blob().then(b => b.arrayBuffer());
-            const resizedSizeMB = resizedBuf.byteLength / (1024 * 1024);
-            
-            if (resizedSizeMB < currentSize) {
-              currentBase64 = arrayBufferToBase64(resizedBuf);
-              currentSize = resizedSizeMB;
-              console.log(`[이미지 리사이징] 시도 ${attempt} 완료: ${currentSize.toFixed(2)}MB`);
-            } else {
-              console.log(`[이미지 리사이징] 시도 ${attempt} 실패: 크기 감소 없음`);
-              break;
-            }
-          } else {
-            console.log(`[이미지 리사이징] 시도 ${attempt} 실패: HTTP ${resizedResp.status}`);
-            break;
-          }
-        }
-        
-        // 최종 결과 적용
-        if (currentSize < fileSizeMB) {
-          imageBase64 = currentBase64;
-          console.log(`[이미지 리사이징] 최종 완료: ${fileSizeMB.toFixed(2)}MB → ${currentSize.toFixed(2)}MB (${attempt}회 시도)`);
-        } else {
-          console.log(`[이미지 리사이징] 실패, 원본 사용`);
-        }
-      } catch (e) {
-        console.log("[이미지 리사이징] 오류:", e);
+    if (!uploadUrl) {
+      const cloneForJson = startResp.clone();
+      const json = await cloneForJson.json().catch(() => null);
+      uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
+      
+      if (!uploadUrl) {
+        throw new Error('Resumable 업로드 URL을 가져올 수 없습니다.');
       }
     }
 
-    // 모든 파일에 대해 동일한 상세한 검열 수행
+    // 2) 파일 업로드 및 finalize
+    const buffer = await file.arrayBuffer();
+    const uploadResp = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Length': file.size,
+        'X-Goog-Upload-Offset': '0',
+        'X-Goog-Upload-Command': 'upload, finalize'
+      },
+      body: buffer
+    });
+    
+    if (!uploadResp.ok) {
+      const err = await uploadResp.text();
+      throw new Error(`이미지 업로드 실패: ${uploadResp.status} ${err}`);
+    }
+
+    const uploadResult = await uploadResp.json();
+    const resourceName = uploadResult.file?.name;
+    if (!resourceName) {
+      throw new Error('업로드 완료 후 resource name을 확인할 수 없습니다.');
+    }
+
+    // 3) 처리 완료 대기 (PROCESSING → ACTIVE)
+    const statusUrl = uploadResult.file?.uri + `?key=${geminiApiKey}`;
+    let statusResp = await fetch(statusUrl);
+    if (!statusResp.ok) {
+      throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
+    }
+    
+    let myfile = await statusResp.json();
+    let waitCount = 0;
+    while (myfile.state === 'PROCESSING' && waitCount < 30) { // 최대 2.5분 대기
+      console.log(`[이미지 검열] 파일 처리 중... (${waitCount + 1}/30)`);
+      await new Promise(r => setTimeout(r, 5000));
+      statusResp = await fetch(statusUrl);
+      if (!statusResp.ok) {
+        throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
+      }
+      myfile = await statusResp.json();
+      waitCount++;
+    }
+    
+    if (myfile.state !== 'ACTIVE') {
+      throw new Error(`이미지 파일이 활성 상태가 아닙니다: ${myfile.state}`);
+    }
+
+    // 4) 검열 요청
+    const fileUri = uploadResult.file.uri;
     const requestBody = {
       contents: [{
         parts: [
-          { text: "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+          { text:
+            "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
             "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
             "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
             "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
@@ -764,8 +571,8 @@ async function handleImageCensorship(file, env) {
             "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
             "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
             "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-          },
-          { inlineData: { mimeType: file.type, data: imageBase64 } }
+           },
+          { file_data: { mime_type: file.type, file_uri: fileUri } }
         ]
       }],
       generationConfig: { 
@@ -779,26 +586,114 @@ async function handleImageCensorship(file, env) {
       }
     };
 
-    console.log(`[이미지 검열] Gemini API 호출 시작...`);
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
-    
     if (!analysis.success) {
-      console.error(`[이미지 검열] Gemini API 호출 실패: ${analysis.error}`);
+      throw new Error(analysis.error);
+    }
+
+    const bad = isInappropriateContent(analysis.text);
+    
+    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
+    if (bad.isInappropriate && bad.reasons.length >= 4) {
+      console.log(`[이미지 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
+      
+      // 보수적 재검토 요청
+      const reReviewBody = {
+        contents: [{
+          parts: [
+            { text:
+              "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+              "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
+              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+             },
+            { file_data: { mime_type: file.type, file_uri: fileUri } }
+          ]
+        }],
+        generationConfig: { 
+          temperature: 0.0, 
+          topK: 10, 
+          topP: 0.7, 
+          maxOutputTokens: 50
+        }
+      };
+      
+      const reReview = await callGeminiAPI(geminiApiKey, reReviewBody);
+      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
+        console.log(`[이미지 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
+        return { ok: true };
+      }
+    }
+    
+    if (bad.isInappropriate) {
+      console.log(`[이미지 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+      };
+    }
+    
+    return { ok: true };
+  } catch (e) {
+    console.log('handleImageCensorshipWithFilesAPI 오류:', e);
+    return { ok: false, response: new Response(JSON.stringify({
+        success: false, error: `이미지 검열 중 오류 발생: ${e.message}`
+      }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+    };
+  }
+}
+
+// inline base64를 사용한 이미지 검열 (더 이상 사용되지 않음 - 모든 파일이 Files API 사용)
+async function handleImageCensorshipWithInlineData(file, env, geminiApiKey) {
+  try {
+    const buf = await file.arrayBuffer();
+    const base64 = arrayBufferToBase64(buf);
+
+    const requestBody = {
+      contents: [{
+        parts: [
+          { text:
+            "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+            "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
+            "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+            "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+            "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+            "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+            "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+            "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+            "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
+            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+            "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+           },
+          { inlineData: { mimeType: file.type, data: base64 } }
+        ]
+      }],
+      generationConfig: { 
+        temperature: 0.05, 
+        topK: 20, 
+        topP: 0.8, 
+        maxOutputTokens: 400,
+        thinkingConfig: {
+          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
+        }
+      }
+    };
+
+    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
+    if (!analysis.success) {
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: `Gemini API 호출 오류: ${analysis.error}`
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
-    
-    console.log(`[이미지 검열] Gemini API 응답 길이: ${analysis.text.length}자`);
-    console.log(`[이미지 검열] Gemini API 응답 내용:`, analysis.text);
 
     const bad = isInappropriateContent(analysis.text);
-    console.log(`[이미지 검열] 분석 결과: ${bad.isInappropriate ? '부적절' : '적절'}, 감지된 카테고리: ${bad.reasons.length}개`);
-    
-    if (bad.reasons.length > 0) {
-      console.log(`[이미지 검열] 감지된 카테고리 목록:`, bad.reasons);
-    }
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
     if (bad.isInappropriate && bad.reasons.length >= 4) {
@@ -813,7 +708,7 @@ async function handleImageCensorship(file, env) {
               "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
               "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
              },
-            { inlineData: { mimeType: file.type, data: imageBase64 } }
+            { inlineData: { mimeType: file.type, data: base64 } }
           ]
         }],
         generationConfig: { 
@@ -828,8 +723,6 @@ async function handleImageCensorship(file, env) {
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
         return { ok: true };
-      } else {
-        console.log(`[재검토 결과] 부적절한 콘텐츠로 최종 판정`);
       }
     }
     
@@ -841,254 +734,152 @@ async function handleImageCensorship(file, env) {
       };
     }
     
-    console.log(`[검열 완료] 적절한 콘텐츠로 판정, 업로드 허용`);
     return { ok: true };
   } catch (e) {
-    console.error("handleImageCensorship 치명적 오류:", e);
-    console.error("오류 스택:", e.stack);
-    // 검열 실패 시 안전장치: 업로드 차단
+    console.log("handleImageCensorshipWithInlineData error:", e);
     return { ok: false, response: new Response(JSON.stringify({
-        success: false, error: `이미지 검열 중 오류 발생: ${e.message}. 보안상 업로드가 차단됩니다.`
+        success: false, error: `이미지 검열 중 오류 발생: ${e.message}`
       }), { status: 500, headers: { 'Content-Type': 'application/json' } })
     };
   }
 }
 
-// 동영상 검열 - Gemini Video 파일 업로드 API 사용 (대용량 파일 최적화)
+// 동영상 검열 - Gemini Video 파일 업로드 API 사용
 async function handleVideoCensorship(file, env) {
   try {
-    console.log(`[비디오 검열 시작] 파일: ${file.name}, 타입: ${file.type}`);
-    
-    const fileSizeMB = file.size / (1024 * 1024);
-    console.log(`[비디오 검열] 파일 크기: ${fileSizeMB.toFixed(2)}MB`);
-    
+    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+    console.log(`[동영상 검열] 파일 크기: ${fileSizeMB}MB`);
     const geminiApiKey = env.GEMINI_API_KEY;
-    
-    // API 키 체크 강화
     if (!geminiApiKey) {
-      console.error(`[치명적 오류] GEMINI_API_KEY가 설정되지 않았습니다!`);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
-    
-    if (geminiApiKey.length < 20) {
-      console.error(`[치명적 오류] GEMINI_API_KEY가 너무 짧습니다: ${geminiApiKey.length}자`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'Gemini API 키가 올바르지 않습니다.'
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
-      };
-    }
-    
-    console.log(`[비디오 검열] API 키 확인됨: ${geminiApiKey.substring(0, 10)}...`);
 
-    // 대용량 파일 처리 최적화: 더 긴 타임아웃과 재시도 로직
-    const maxRetries = fileSizeMB > 100 ? 5 : 3;
-    const baseTimeout = fileSizeMB > 100 ? 120000 : 60000; // 2분 또는 1분
-    
-    let uploadUrl;
-    let uploadResult;
-    
-    // 1) Resumable upload 시작 (재시도 로직 추가)
-    for (let retry = 0; retry < maxRetries; retry++) {
-      try {
-        console.log(`[비디오 업로드] 시작 (${retry + 1}/${maxRetries})`);
-        
-        const startResp = await fetch(
-          `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
-          { 
-            method: 'POST',
-            headers: {
-              'X-Goog-Upload-Protocol': 'resumable',
-              'X-Goog-Upload-Command': 'start',
-              'X-Goog-Upload-Header-Content-Length': file.size,
-              'X-Goog-Upload-Header-Content-Type': file.type,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ 
-              file: { 
-                display_name: `video_upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}` 
-              } 
-            })
-          }
-        );
-        
-        if (!startResp.ok) {
-          if (retry === maxRetries - 1) {
-            const err = await startResp.text();
-            throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
-          }
-          console.log(`[비디오 업로드] 재시도 ${retry + 1}: ${startResp.status}`);
-          await new Promise(r => setTimeout(r, Math.pow(2, retry) * 1000)); // 지수적 백오프
-          continue;
-        }
-        
-        uploadUrl = startResp.headers.get('X-Goog-Upload-URL') || startResp.headers.get('Location');
-        
-        if (!uploadUrl) {
-          const json = await startResp.json().catch(() => null);
-          uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
-        }
-        
-        if (!uploadUrl) {
-          if (retry === maxRetries - 1) {
-            const hdrs = [...startResp.headers].map(([k, v]) => `${k}: ${v}`).join('\n');
-            const textBody = await startResp.text().catch(() => '');
-            throw new Error(`Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디:\n${textBody}`);
-          }
-          console.log(`[비디오 업로드] URL 획득 실패, 재시도 ${retry + 1}`);
-          await new Promise(r => setTimeout(r, Math.pow(2, retry) * 1000));
-          continue;
-        }
-        
-        break; // 성공하면 루프 종료
-      } catch (e) {
-        if (retry === maxRetries - 1) throw e;
-        console.log(`[비디오 업로드] 시작 오류 (재시도 ${retry + 1}):`, e.message);
-        await new Promise(r => setTimeout(r, Math.pow(2, retry) * 1000));
-      }
-    }
-
-    // 2) 파일 업로드 및 finalize (청크 업로드 지원)
-    const buffer = await file.arrayBuffer();
-    const chunkSize = Math.max(1024 * 1024, Math.min(8 * 1024 * 1024, buffer.byteLength / 10)); // 1MB~8MB 또는 파일의 1/10
-    
-    if (buffer.byteLength > chunkSize && fileSizeMB > 50) {
-      console.log(`[비디오 업로드] 청크 업로드 시작: ${Math.ceil(buffer.byteLength / chunkSize)}개 청크`);
-      
-      // 청크별 업로드
-      for (let offset = 0; offset < buffer.byteLength; offset += chunkSize) {
-        const chunk = buffer.slice(offset, Math.min(offset + chunkSize, buffer.byteLength));
-        const isLastChunk = offset + chunkSize >= buffer.byteLength;
-        
-        const uploadCommand = isLastChunk ? 'upload, finalize' : 'upload';
-        
-        for (let retry = 0; retry < 3; retry++) {
-          try {
-            const uploadResp = await fetch(uploadUrl, {
-              method: 'POST',
-              headers: {
-                'Content-Length': chunk.byteLength,
-                'X-Goog-Upload-Offset': offset,
-                'X-Goog-Upload-Command': uploadCommand
-              },
-              body: chunk
-            });
-            
-            if (!uploadResp.ok) {
-              if (retry === 2) {
-                const err = await uploadResp.text();
-                throw new Error(`비디오 청크 업로드 실패: ${uploadResp.status} ${err}`);
-              }
-              console.log(`[비디오 업로드] 청크 재시도 ${retry + 1}: ${uploadResp.status}`);
-              await new Promise(r => setTimeout(r, 1000 * (retry + 1)));
-              continue;
-            }
-            
-            if (isLastChunk) {
-              uploadResult = await uploadResp.json();
-            }
-            
-            console.log(`[비디오 업로드] 청크 ${Math.floor(offset / chunkSize) + 1}/${Math.ceil(buffer.byteLength / chunkSize)} 완료`);
-            break;
-          } catch (e) {
-            if (retry === 2) throw e;
-            console.log(`[비디오 업로드] 청크 오류 (재시도 ${retry + 1}):`, e.message);
-            await new Promise(r => setTimeout(r, 1000 * (retry + 1)));
-          }
-        }
-      }
-    } else {
-      // 일반 업로드
-      const uploadResp = await fetch(uploadUrl, {
-        method: 'POST',
+    // 1) Resumable upload 시작
+    console.log(`[동영상 검열] Files API resumable upload 시작`);
+    const startResp = await fetch(
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
+      { method: 'POST',
         headers: {
-          'Content-Length': file.size,
-          'X-Goog-Upload-Offset': '0',
-          'X-Goog-Upload-Command': 'upload, finalize'
+          'X-Goog-Upload-Protocol': 'resumable',
+          'X-Goog-Upload-Command': 'start',
+          'X-Goog-Upload-Header-Content-Length': file.size,
+          'X-Goog-Upload-Header-Content-Type': file.type,
+          'Content-Type': 'application/json'
         },
-        body: buffer
-      });
-      
-      if (!uploadResp.ok) {
-        const err = await uploadResp.text();
-        throw new Error(`비디오 업로드 실패: ${uploadResp.status} ${err}`);
+        body: JSON.stringify({ file: { display_name: 'video_upload' } })
       }
-      
-      uploadResult = await uploadResp.json();
+    );
+    if (!startResp.ok) {
+      const err = await startResp.text();
+      throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
+    }
+    let uploadUrl =
+      startResp.headers.get('X-Goog-Upload-URL') ||
+      startResp.headers.get('Location');
+
+    if (!uploadUrl) {
+      // Response 본문을 두 번 읽으려면 clone() 사용
+      const cloneForJson = startResp.clone();
+      const cloneForText = startResp.clone();
+
+      // JSON 바디에서 가능한 필드 확인
+      const json = await cloneForJson.json().catch(() => null);
+      uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
+
+      if (!uploadUrl) {
+        const hdrs = [...startResp.headers]
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\n');
+        const textBody = await cloneForText.text().catch(() => '');
+        throw new Error(
+          `Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디:\n${textBody}`
+        );
+      }
+    }
+
+    // 2) 파일 업로드 및 finalize
+    console.log(`[동영상 검열] ${fileSizeMB}MB 파일 업로드 중...`);
+    const buffer = await file.arrayBuffer();
+    const uploadResp = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Length': file.size,
+        'X-Goog-Upload-Offset': '0',
+        'X-Goog-Upload-Command': 'upload, finalize'
+      },
+      body: buffer
+    });
+    if (!uploadResp.ok) {
+      const err = await uploadResp.text();
+      throw new Error(`비디오 업로드 실패: ${uploadResp.status} ${err}`);
     }
 
     // 3) 업로드 완료 응답에서 resource name 추출
-    const resourceName = uploadResult.file?.name;
-    if (!resourceName) {
-      throw new Error(`업로드 완료 후 resource name을 확인할 수 없습니다. 응답: ${JSON.stringify(uploadResult)}`);
-    }
+    const uploadResult = await uploadResp.json();
+    // file 객체 내부의 name 필드를 사용합니다.
+       const resourceName = uploadResult.file?.name;
+        if (!resourceName) {
+         throw new Error(
+           `업로드 완료 후 resource name을 확인할 수 없습니다. 응답: ${JSON.stringify(uploadResult)}`
+         );
+      }
+    console.log(`[동영상 검열] 업로드 완료, 파일 처리 대기 중...`);
     
-    // 4) 처리 완료 대기 (PROCESSING → ACTIVE) - 대용량 파일용 더 긴 대기 시간
+    // 4) 처리 완료 대기 (PROCESSING → ACTIVE) - 대용량 파일을 위해 대기 시간 증가
     const statusUrl = uploadResult.file?.uri + `?key=${env.GEMINI_API_KEY}`;
-    const maxWaitTime = Math.max(300000, fileSizeMB * 2000); // 최소 5분 또는 파일 크기당 2초
-    const startTime = Date.now();
-    
     let statusResp = await fetch(statusUrl);
     if (!statusResp.ok) {
       throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
     }
-    
     let myfile = await statusResp.json();
     let waitCount = 0;
+    const maxWaitCount = Math.max(60, Math.ceil(file.size / (10 * 1024 * 1024))); // 최소 60회, 파일 크기에 따라 증가
     
-    while (myfile.state === 'PROCESSING') {
-      const elapsed = Date.now() - startTime;
-      if (elapsed > maxWaitTime) {
-        throw new Error(`비디오 처리 시간 초과 (${Math.round(elapsed / 1000)}초). 파일이 너무 크거나 복잡할 수 있습니다.`);
-      }
-      
-      // 대용량 파일의 경우 더 긴 대기 간격
-      const waitInterval = fileSizeMB > 100 ? 15000 : (fileSizeMB > 50 ? 10000 : 5000);
-      
-      console.log(`[비디오 처리] 대기 중... ${++waitCount}회 (${Math.round(elapsed / 1000)}초 경과)`);
-      await new Promise(r => setTimeout(r, waitInterval));
-      
+    while (myfile.state === 'PROCESSING' && waitCount < maxWaitCount) {
+      console.log(`[동영상 검열] 파일 처리 중... (${waitCount + 1}/${maxWaitCount}) - 상태: ${myfile.state}`);
+      await new Promise(r => setTimeout(r, 5000));
       statusResp = await fetch(statusUrl);
       if (!statusResp.ok) {
         throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
       }
       myfile = await statusResp.json();
+      waitCount++;
     }
-    
     if (myfile.state !== 'ACTIVE') {
       throw new Error(`비디오 파일이 활성 상태가 아닙니다: ${myfile.state}`);
     }
     
-    console.log(`[비디오 처리] 완료 (${Math.round((Date.now() - startTime) / 1000)}초)`);
+    console.log(`[동영상 검열] 파일 처리 완료, 검열 분석 시작`);
 
-    // 5) 검열 요청 - 모든 파일에 대해 동일한 상세한 검열 수행
+    // 5) 검열 요청
     const fileUri = uploadResult.file.uri;
-    
     const requestBody = {
       contents: [{
         parts: [
-          { text: "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
-            "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
-            "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-            "Consider the entire video duration and any content that appears briefly. " +
-            "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-            "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-            "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-            "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-            "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-            "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
-            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-            "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-          },
+          { text:
+              "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
+              "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
+              "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+              "Consider the entire video duration and any content that appears briefly. " +
+              "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+              "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+              "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+              "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+              "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+              "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+              "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
+              "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+              "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+              "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+              "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+              "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+              "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+              "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+              "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+             },
           { file_data: { mime_type: file.type, file_uri: fileUri } }
         ]
       }],
@@ -1102,24 +893,11 @@ async function handleVideoCensorship(file, env) {
         }
       }
     };
-    
-    console.log(`[비디오 검열] Gemini API 호출 시작...`);
     const analysis = await callGeminiAPI(geminiApiKey, requestBody);
-    
     if (!analysis.success) {
-      console.error(`[비디오 검열] Gemini API 호출 실패: ${analysis.error}`);
       throw new Error(analysis.error);
     }
-    
-    console.log(`[비디오 검열] Gemini API 응답 길이: ${analysis.text.length}자`);
-    console.log(`[비디오 검열] Gemini API 응답 내용:`, analysis.text);
-    
     const bad = isInappropriateContent(analysis.text);
-    console.log(`[비디오 검열] 분석 결과: ${bad.isInappropriate ? '부적절' : '적절'}, 감지된 카테고리: ${bad.reasons.length}개`);
-    
-    if (bad.reasons.length > 0) {
-      console.log(`[비디오 검열] 감지된 카테고리 목록:`, bad.reasons);
-    }
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
     if (bad.isInappropriate && bad.reasons.length >= 4) {
@@ -1149,8 +927,6 @@ async function handleVideoCensorship(file, env) {
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
         return { ok: true };
-      } else {
-        console.log(`[비디오 재검토 결과] 부적절한 콘텐츠로 최종 판정`);
       }
     }
     
@@ -1161,106 +937,55 @@ async function handleVideoCensorship(file, env) {
         }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
     }
     
-    console.log(`[비디오 검열 완료] 적절한 콘텐츠로 판정, 업로드 허용`);
+    console.log(`[비디오 검열 완료] 적절한 콘텐츠로 판정, 통과`);
     return { ok: true };
   } catch (e) {
-    console.error('handleVideoCensorship 치명적 오류:', e);
-    // 검열 실패 시 안전장치: 업로드 차단
+    console.log('handleVideoCensorship 오류:', e);
     return { ok: false, response: new Response(JSON.stringify({
-        success: false, error: `동영상 검열 중 오류 발생: ${e.message}. 보안상 업로드가 차단됩니다.`
+        success: false, error: `동영상 검열 중 오류 발생: ${e.message}`
       }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
   }
 }
 
-// Gemini API 호출 함수 (대용량 파일 최적화)
+// Gemini API 호출 함수
 async function callGeminiAPI(apiKey, requestBody) {
-  const maxRetries = 5; // 재시도 횟수 증가
-  const baseRetryDelay = 2000; // 기본 지연 시간
-  const maxRetryDelay = 30000; // 최대 지연 시간
-  
-  // 요청 크기 추정 (대용량 파일 처리 시 더 긴 타임아웃)
-  const isLargeRequest = JSON.stringify(requestBody).length > 1000000; // 1MB 이상
-  const baseTimeout = isLargeRequest ? 180000 : 60000; // 3분 또는 1분
-  
   let retryCount = 0;
-  
+  const maxRetries = 3, retryDelay = 2000;
   while (retryCount < maxRetries) {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), baseTimeout + (retryCount * 30000));
-      
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-      
-      console.log(`[Gemini API] 호출 시도 ${retryCount + 1}/${maxRetries}${isLargeRequest ? ' (대용량 요청)' : ''}`);
-      
       const response = await fetch(apiUrl, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'User-Agent': 'CloudflareWorker/1.0' // 더 안정적인 요청을 위한 User-Agent
-        },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
       });
-      
-      clearTimeout(timeoutId);
-      
       if (!response.ok) {
-        const errorText = await response.text();
-        
-        // 특정 오류 코드에 따른 처리
-        if (response.status === 429) {
-          // 요청 제한 - 더 긴 대기 시간
-          const waitTime = Math.min(baseRetryDelay * Math.pow(2, retryCount) + Math.random() * 1000, maxRetryDelay);
-          console.log(`[Gemini API] 요청 제한 (429), ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
-          await new Promise(r => setTimeout(r, waitTime));
+        if (response.status === 429 && retryCount < maxRetries - 1) {
           retryCount++;
+          console.log(`할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
+          await new Promise(r => setTimeout(r, retryDelay));
           continue;
-        } else if (response.status === 503 || response.status === 502 || response.status === 500) {
-          // 서버 오류 - 재시도
-          const waitTime = Math.min(baseRetryDelay * Math.pow(1.5, retryCount), maxRetryDelay);
-          console.log(`[Gemini API] 서버 오류 (${response.status}), ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
-          await new Promise(r => setTimeout(r, waitTime));
-          retryCount++;
-          continue;
-        } else if (response.status === 400) {
-          // 잘못된 요청 - 재시도하지 않음
-          console.log(`[Gemini API] 잘못된 요청 (400):`, errorText);
-          return { success: false, error: `잘못된 요청: ${errorText}` };
-        } else if (response.status === 413) {
-          // 요청 크기 초과 - 재시도하지 않음
-          console.log(`[Gemini API] 요청 크기 초과 (413):`, errorText);
-          return { success: false, error: `요청 크기가 너무 큽니다. 파일 크기를 줄여주세요.` };
-        } else {
-          // 기타 오류
-          console.log(`[Gemini API] 호출 실패 (${response.status}):`, errorText);
-          return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
         }
+        console.log('Gemini API 호출 실패:', {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries([...response.headers])
+        });
+        const errText = await response.text();
+        return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
-      
       const data = await response.json();
       
       // Gemini 2.5 Flash의 새로운 응답 구조 처리
       const candidate = data.candidates?.[0];
       if (!candidate?.content?.parts) {
-        console.log(`[Gemini API] 응답 구조 오류:`, {
+        console.log('Gemini API 응답 상태:', {
           hasCandidates: !!data.candidates,
           candidatesLength: data.candidates?.length || 0,
           hasContent: !!candidate?.content,
           hasParts: !!candidate?.content?.parts,
-          responseKeys: Object.keys(data || {}),
-          fullResponse: data
+          responseKeys: Object.keys(data || {})
         });
-        
-        // 응답 구조 문제가 있을 경우 재시도
-        if (retryCount < maxRetries - 1) {
-          const waitTime = Math.min(baseRetryDelay * Math.pow(1.2, retryCount), maxRetryDelay);
-          console.log(`[Gemini API] 응답 구조 문제, ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
-          await new Promise(r => setTimeout(r, waitTime));
-          retryCount++;
-          continue;
-        }
-        
         return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
 
@@ -1278,47 +1003,24 @@ async function callGeminiAPI(apiKey, requestBody) {
       }
 
       if (!responseText) {
-        console.log(`[Gemini API] 응답 텍스트 추출 실패:`, {
+        console.log('Gemini API 응답 파싱 실패:', {
           partsCount: candidate.content.parts.length,
-          parts: candidate.content.parts.map(p => ({ hasText: !!p.text, thought: p.thought, textLength: p.text?.length || 0 }))
+          parts: candidate.content.parts.map(p => ({ hasText: !!p.text, thought: p.thought }))
         });
-        
-        // 텍스트 추출 실패 시 재시도
-        if (retryCount < maxRetries - 1) {
-          const waitTime = Math.min(baseRetryDelay * Math.pow(1.2, retryCount), maxRetryDelay);
-          console.log(`[Gemini API] 텍스트 추출 실패, ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
-          await new Promise(r => setTimeout(r, waitTime));
-          retryCount++;
-          continue;
-        }
-        
         return { success: false, error: 'Gemini API 응답에서 텍스트를 추출할 수 없습니다.' };
       }
 
-      console.log(`[Gemini API] 성공 - 응답 길이: ${responseText.length}자`);
       return { success: true, text: responseText };
-      
     } catch (e) {
-      console.log(`[Gemini API] 오류 (시도 ${retryCount + 1}/${maxRetries}):`, e.message);
-      
-      // 네트워크 오류나 타임아웃의 경우 재시도
-      if (e.name === 'AbortError') {
-        console.log(`[Gemini API] 요청 타임아웃 (${baseTimeout + (retryCount * 30000)}ms)`);
-      } else if (e.message.includes('fetch')) {
-        console.log(`[Gemini API] 네트워크 오류`);
-      }
-      
-      if (retryCount < maxRetries - 1) {
-        const waitTime = Math.min(baseRetryDelay * Math.pow(2, retryCount) + Math.random() * 1000, maxRetryDelay);
-        console.log(`[Gemini API] ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
-        await new Promise(r => setTimeout(r, waitTime));
-        retryCount++;
+      retryCount++;
+      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
+      if (retryCount < maxRetries) {
+        await new Promise(r => setTimeout(r, retryDelay));
       } else {
         return { success: false, error: `API 호출 오류: ${e.message}` };
       }
     }
   }
-  
   return { success: false, error: '최대 재시도 횟수 초과' };
 }
 
@@ -1326,8 +1028,6 @@ async function callGeminiAPI(apiKey, requestBody) {
 // 부적절한 내용 분석 함수 (강화된 버전)
 // =======================
 function isInappropriateContent(responseText) {
-  console.log(`[검열 분석] 응답 텍스트 분석 시작 (길이: ${responseText.length}자)`);
-  
   // 카테고리 인덱스 → 사용자 표시용 이름 매핑 (한국어)
   const categoryMap = {
     1: '성적/노출 콘텐츠',
@@ -1346,39 +1046,30 @@ function isInappropriateContent(responseText) {
 
   // 결과 저장소
   const flagged = [];
-  let totalChecked = 0;
 
   // 응답을 줄별로 순회하며 다양한 패턴 파싱
-  const lines = responseText.split(/\r?\n/);
-  console.log(`[검열 분석] 총 ${lines.length}개 줄 분석`);
-  
-  lines.forEach((line, lineIndex) => {
-    const trimmedLine = line.trim();
-    if (!trimmedLine) return;
-    
-    console.log(`[검열 분석] 줄 ${lineIndex + 1}: "${trimmedLine}"`);
-    
+  responseText.split(/\r?\n/).forEach((line, lineIndex) => {
     // 패턴 1: "숫자. true/false" 형태
-    let m = trimmedLine.match(/^\s*([1-9]|1[0-2])\.\s*(true|false)\b/i);
+    let m = line.match(/^\s*([1-9]|1[0-2])\.\s*(true|false)\b/i);
     if (!m) {
       // 패턴 2: "숫자: true/false" 형태
-      m = trimmedLine.match(/^\s*([1-9]|1[0-2]):\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|1[0-2]):\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 3: "숫자 - true/false" 형태
-      m = trimmedLine.match(/^\s*([1-9]|1[0-2])\s*[-–]\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|1[0-2])\s*[-–]\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 4: "숫자) true/false" 형태
-      m = trimmedLine.match(/^\s*([1-9]|1[0-2])\)\s*(true|false)\b/i);
+      m = line.match(/^\s*([1-9]|1[0-2])\)\s*(true|false)\b/i);
     }
     if (!m) {
       // 패턴 5: 단순히 "true" 또는 "false"만 있는 경우 (순서대로 1-12 매핑)
-      const trueMatch = trimmedLine.match(/^\s*(true|false)\b/i);
+      const trueMatch = line.match(/^\s*(true|false)\b/i);
       if (trueMatch) {
         // 실제 내용이 있는 줄들만 카운트
-        const contentLines = lines.filter(l => l.trim().match(/^\s*(true|false)\b/i));
-        const contentLineIndex = contentLines.indexOf(trimmedLine);
+        const contentLines = responseText.split(/\r?\n/).filter(l => l.trim().match(/^\s*(true|false)\b/i));
+        const contentLineIndex = contentLines.indexOf(line.trim());
         if (contentLineIndex >= 0 && contentLineIndex < 12) {
           m = [null, (contentLineIndex + 1).toString(), trueMatch[1]];
         }
@@ -1388,56 +1079,16 @@ function isInappropriateContent(responseText) {
     if (m) {
       const idx = Number(m[1]);
       const val = m[2].toLowerCase() === 'true';
-      totalChecked++;
-      
-      console.log(`[검열 분석] 카테고리 ${idx} (${categoryMap[idx]}): ${val ? 'TRUE' : 'FALSE'}`);
-      
       if (val && categoryMap[idx]) {
         flagged.push(categoryMap[idx]);
       }
-    } else {
-      console.log(`[검열 분석] 패턴 매칭 실패: "${trimmedLine}"`);
     }
   });
 
-  console.log(`[검열 분석] 총 ${totalChecked}개 카테고리 확인, ${flagged.length}개 부적절 감지`);
-  
-  // 안전장치: 전혀 파싱되지 않은 경우 의심스러운 상황으로 판단
-  if (totalChecked === 0) {
-    console.warn(`[검열 분석] 경고: 아무것도 파싱되지 않음. 응답 내용 재확인 필요.`);
-    console.warn(`[검열 분석] 전체 응답:`, responseText);
-    
-    // 응답에 명시적으로 "appropriate" 또는 "safe" 같은 단어가 있으면 허용
-    const safeWords = ['appropriate', 'safe', 'acceptable', 'legitimate', 'normal'];
-    const inappropriateWords = ['inappropriate', 'unsafe', 'offensive', 'explicit', 'sexual', 'violent'];
-    
-    const lowerResponse = responseText.toLowerCase();
-    const hasSafeWords = safeWords.some(word => lowerResponse.includes(word));
-    const hasInappropriateWords = inappropriateWords.some(word => lowerResponse.includes(word));
-    
-    console.log(`[검열 분석] 키워드 검색 - 안전: ${hasSafeWords}, 부적절: ${hasInappropriateWords}`);
-    
-    if (hasInappropriateWords && !hasSafeWords) {
-      console.warn(`[검열 분석] 부적절한 키워드 감지로 차단 처리`);
-      return {
-        isInappropriate: true,
-        reasons: ['응답 파싱 실패 - 부적절한 키워드 감지']
-      };
-    }
-  }
-  
-  // 최종 결과 로깅
-  const result = {
+  return {
     isInappropriate: flagged.length > 0,
     reasons: flagged
   };
-  
-  console.log(`[검열 분석] 최종 결과: ${result.isInappropriate ? '부적절' : '적절'}`);
-  if (result.reasons.length > 0) {
-    console.log(`[검열 분석] 부적절한 카테고리:`, result.reasons);
-  }
-  
-  return result;
 }
 
 // MP4 재생길이 간단 추출 함수
@@ -2172,6 +1823,20 @@ function renderApiDocs(host) {
       margin-right: 15px;
       border-radius: 8px;
     }
+    .highlight {
+      background-color: #fff3cd;
+      border: 1px solid #ffeaa7;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 20px 0;
+    }
+    .info {
+      background-color: #d1ecf1;
+      border: 1px solid #b8daff;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 20px 0;
+    }
   </style>
 </head>
 <body>
@@ -2180,7 +1845,38 @@ function renderApiDocs(host) {
     <h1>이미지 공유 API 문서</h1>
   </div>
   
+  <div class="highlight">
+    <h3>🚀 Files API 통합 처리</h3>
+    <p><strong>최대 2GB까지 지원!</strong> 모든 파일이 Google Files API를 통해 일관되고 안정적으로 처리됩니다.</p>
+    <ul>
+      <li>모든 파일이 Google Files API를 통한 통합 처리</li>
+      <li>일관된 업로드 경험과 안정적인 대용량 파일 지원</li>
+      <li>원본 품질 유지 (리사이징 없음)</li>
+    </ul>
+  </div>
+  
   <p>이 API는 외부 애플리케이션에서 이미지 및 동영상을 업로드하고 공유할 수 있는 기능을 제공합니다. 모든 콘텐츠는 업로드 전 자동 검열됩니다.</p>
+  
+  <h2>파일 크기 제한</h2>
+  <div class="info">
+    <table>
+      <tr>
+        <th>파일 크기</th>
+        <th>처리 방식</th>
+        <th>설명</th>
+      </tr>
+      <tr>
+        <td>~ 2GB</td>
+        <td>Google Files API</td>
+        <td>모든 파일 통합 처리, 안정적이고 일관된 업로드</td>
+      </tr>
+      <tr>
+        <td>2GB 초과</td>
+        <td>업로드 거부</td>
+        <td>현재 지원하지 않음</td>
+      </tr>
+    </table>
+  </div>
   
   <h2>엔드포인트</h2>
   
@@ -2202,7 +1898,7 @@ function renderApiDocs(host) {
         <td>file</td>
         <td>File</td>
         <td>예</td>
-        <td>업로드할 이미지 또는 동영상 파일. 여러 파일 업로드 가능.</td>
+        <td>업로드할 이미지 또는 동영상 파일. 여러 파일 업로드 가능. (최대 2GB)</td>
       </tr>
       <tr>
         <td>customName</td>
@@ -2225,7 +1921,15 @@ function renderApiDocs(host) {
   "url": "https://${host}/ABC123",
   "rawUrls": ["https://${host}/ABC123?raw=1"],
   "codes": ["ABC123"],
-  "fileTypes": ["image/jpeg"]
+  "fileTypes": ["image/jpeg"],
+  "totalFiles": 1,
+  "totalSizeMB": "15.3"
+}</pre>
+    
+    <p>파일 크기 초과 오류 (400 Bad Request):</p>
+    <pre>{
+  "success": false,
+  "error": "파일 크기가 너무 큽니다. 최대 2GB까지 지원됩니다. (현재 파일: 2048.5MB)"
 }</pre>
     
     <p>파일 형식 오류 (400 Bad Request):</p>
@@ -2255,6 +1959,41 @@ function renderApiDocs(host) {
 }</pre>
   </div>
   
+  <h2>대용량 파일 처리</h2>
+  <div class="info">
+    <h3>통합 처리 시스템</h3>
+    <p>모든 파일이 Google Files API를 통해 처리되어 일관된 업로드 경험을 제공합니다:</p>
+    <ul>
+      <li><strong>모든 파일:</strong> Google Files API를 통한 안정적이고 일관된 처리</li>
+      <li><strong>대용량 파일:</strong> 최대 2GB까지 안정적인 업로드 지원</li>
+      <li><strong>원본 품질:</strong> 리사이징 없이 원본 그대로 보존</li>
+    </ul>
+    
+    <h3>처리 시간 예상</h3>
+    <table>
+      <tr>
+        <th>파일 크기</th>
+        <th>예상 처리 시간</th>
+      </tr>
+      <tr>
+        <td>~ 10MB</td>
+        <td>5-15초</td>
+      </tr>
+      <tr>
+        <td>10MB ~ 50MB</td>
+        <td>15-45초</td>
+      </tr>
+      <tr>
+        <td>50MB ~ 200MB</td>
+        <td>45초 ~ 3분</td>
+      </tr>
+      <tr>
+        <td>200MB ~ 2GB</td>
+        <td>3분 ~ 10분</td>
+      </tr>
+    </table>
+  </div>
+  
   <h2>레이트 리미팅</h2>
   <div class="endpoint">
     <h3>업로드 제한</h3>
@@ -2269,9 +2008,10 @@ function renderApiDocs(host) {
   <h2>코드 예제</h2>
   
   <div class="example">
-    <h3>cURL</h3>
+    <h3>cURL (대용량 파일)</h3>
     <pre>curl -X POST https://${host}/api/upload \
-  -F "file=@/path/to/image.jpg"</pre>
+  -F "file=@/path/to/large_video.mp4" \
+  -H "Content-Type: multipart/form-data"</pre>
   </div>
   
   <div class="example">
@@ -2287,6 +2027,7 @@ fetch('https://${host}/api/upload', {
 .then(data => {
   if (data.success) {
     console.log('업로드 성공:', data.url);
+    console.log('파일 크기:', data.totalSizeMB + 'MB');
   } else {
     console.error('업로드 실패:', data.error);
   }
@@ -2301,13 +2042,14 @@ fetch('https://${host}/api/upload', {
     <pre>import requests
 
 url = 'https://${host}/api/upload'
-files = {'file': open('image.jpg', 'rb')}
+files = {'file': open('large_image.jpg', 'rb')}
 
 response = requests.post(url, files=files)
 data = response.json()
 
 if data['success']:
     print('업로드 성공:', data['url'])
+    print('총 파일 크기:', data['totalSizeMB'], 'MB')
 else:
     print('업로드 실패:', data['error'])</pre>
   </div>
@@ -2316,9 +2058,11 @@ else:
   <ul>
     <li>모든 업로드된 파일은 자동 검열 시스템을 통과해야 합니다.</li>
     <li>대용량 파일 업로드 시 서버 처리 시간이 길어질 수 있습니다.</li>
+    <li>모든 파일이 Google Files API를 통해 일관되게 처리됩니다.</li>
     <li>기본적으로 랜덤 코드가 생성되지만, <code>customName</code> 파라미터를 통해 사용자 지정 이름을 부여할 수 있습니다.</li>
     <li>동일한 사용자 지정 이름이 이미 존재하는 경우 업로드가 실패합니다.</li>
     <li>외부 도메인에서 API 요청 시 CORS 헤더가 자동으로 추가됩니다.</li>
+    <li>Google Files API를 통해 최대 2GB까지 안정적으로 처리됩니다.</li>
   </ul>
 </body>
 </html>`;
