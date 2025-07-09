@@ -305,7 +305,7 @@ export default {
   }
 };
 
-// 메인 업로드 처리 함수
+// 메인 업로드 처리 함수 (대용량 파일 최적화)
 async function handleUpload(request, env) {
   const formData = await request.formData();
   const files = formData.getAll('file');
@@ -318,45 +318,131 @@ async function handleUpload(request, env) {
     });
   }
 
+  // 파일 크기 및 형식 검사 (대용량 파일 지원)
   const allowedImageTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
   const allowedVideoTypes = ["video/mp4", "video/webm", "video/ogg", "video/x-msvideo", "video/avi", "video/msvideo"];
+  const maxFileSize = 2 * 1024 * 1024 * 1024; // 2GB (Gemini API 제한)
+  const maxTotalSize = 5 * 1024 * 1024 * 1024; // 전체 5GB 제한
+  
+  let totalSize = 0;
+  let largeFileCount = 0;
+  
   for (const file of files) {
+    const fileSizeMB = file.size / (1024 * 1024);
+    totalSize += file.size;
+    
+    console.log(`[파일 검사] ${file.name}: ${fileSizeMB.toFixed(2)}MB, 타입: ${file.type}`);
+    
+    // 개별 파일 크기 체크
+    if (file.size > maxFileSize) {
+      return new Response(JSON.stringify({ 
+        success: false, 
+        error: `파일 "${file.name}"이 너무 큽니다. 최대 2GB까지 지원됩니다. (현재: ${fileSizeMB.toFixed(2)}MB)` 
+      }), {
+        status: 400, headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // 대용량 파일 카운트 (50MB 이상)
+    if (fileSizeMB > 50) {
+      largeFileCount++;
+    }
+    
+    // 파일 형식 검사
     if (file.type.startsWith('image/')) {
       if (!allowedImageTypes.includes(file.type)) {
-        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 이미지 형식입니다.' }), {
+        return new Response(JSON.stringify({ 
+          success: false, 
+          error: `"${file.name}"은 지원하지 않는 이미지 형식입니다. 지원 형식: JPEG, PNG, GIF, WEBP` 
+        }), {
           status: 400, headers: { 'Content-Type': 'application/json' }
         });
       }
     } else if (file.type.startsWith('video/')) {
       if (!allowedVideoTypes.includes(file.type)) {
-        return new Response(JSON.stringify({ success: false, error: '지원하지 않는 동영상 형식입니다.' }), {
+        return new Response(JSON.stringify({ 
+          success: false, 
+          error: `"${file.name}"은 지원하지 않는 동영상 형식입니다. 지원 형식: MP4, WEBM, OGG, AVI` 
+        }), {
           status: 400, headers: { 'Content-Type': 'application/json' }
         });
       }
     } else {
-      return new Response(JSON.stringify({ success: false, error: '지원하지 않는 파일 형식입니다.' }), {
-        status: 400, headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ 
+        success: false, 
+        error: `"${file.name}"은 지원하지 않는 파일 형식입니다. 이미지 또는 동영상 파일만 업로드할 수 있습니다.` 
+      }), {
+        status: 400, headers: { 'Content-Type': 'application/json' } 
+      });
     }
   }
 
-  // 1) 검열
+  // 전체 파일 크기 체크
+  if (totalSize > maxTotalSize) {
+    return new Response(JSON.stringify({ 
+      success: false, 
+      error: `전체 파일 크기가 너무 큽니다. 최대 5GB까지 지원됩니다. (현재: ${(totalSize / (1024 * 1024 * 1024)).toFixed(2)}GB)` 
+    }), {
+      status: 400, headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  // 대용량 파일 경고 로그
+  if (largeFileCount > 0) {
+    console.log(`[대용량 파일 감지] ${largeFileCount}개의 대용량 파일 (50MB+) 감지. 처리 시간이 오래 걸릴 수 있습니다.`);
+  }
+
+  // 1) 검열 (대용량 파일 최적화)
   try {
-    console.log(`[검열 시작] ${files.length}개 파일 검열 시작`);
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.type}, ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+    console.log(`[검열 시작] ${files.length}개 파일 검열 시작 (총 ${(totalSize / (1024 * 1024)).toFixed(2)}MB)`);
+    
+    // 대용량 파일이 있는 경우 순차 처리 (동시 처리 시 메모리 부족 방지)
+    const shouldProcessSequentially = largeFileCount > 0 || totalSize > 100 * 1024 * 1024; // 100MB 이상
+    
+    if (shouldProcessSequentially) {
+      console.log(`[검열 모드] 순차 처리 모드 (대용량 파일 ${largeFileCount}개)`);
       
-      const r = file.type.startsWith('image/')
-        ? await handleImageCensorship(file, env)
-        : await handleVideoCensorship(file, env);
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const fileSizeMB = file.size / (1024 * 1024);
+        console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.name} (${fileSizeMB.toFixed(2)}MB)`);
         
-      if (!r.ok) {
-        console.log(`[검열 실패] ${i + 1}번째 파일에서 검열 실패`);
-        return r.response;
-      } else {
-        console.log(`[검열 통과] ${i + 1}번째 파일 검열 통과`);
+        const r = file.type.startsWith('image/')
+          ? await handleImageCensorship(file, env)
+          : await handleVideoCensorship(file, env);
+          
+        if (!r.ok) {
+          console.log(`[검열 실패] ${i + 1}번째 파일 "${file.name}"에서 검열 실패`);
+          return r.response;
+        } else {
+          console.log(`[검열 통과] ${i + 1}번째 파일 "${file.name}" 검열 통과`);
+        }
       }
+    } else {
+      console.log(`[검열 모드] 병렬 처리 모드`);
+      
+      // 기존 병렬 처리 방식
+      const censorshipPromises = files.map(async (file, index) => {
+        const fileSizeMB = file.size / (1024 * 1024);
+        console.log(`[검열 진행] ${index + 1}/${files.length} - ${file.name} (${fileSizeMB.toFixed(2)}MB)`);
+        
+        const r = file.type.startsWith('image/')
+          ? await handleImageCensorship(file, env)
+          : await handleVideoCensorship(file, env);
+          
+        if (!r.ok) {
+          console.log(`[검열 실패] ${index + 1}번째 파일 "${file.name}"에서 검열 실패`);
+          throw new Error(`검열 실패: ${file.name}`);
+        } else {
+          console.log(`[검열 통과] ${index + 1}번째 파일 "${file.name}" 검열 통과`);
+        }
+        
+        return r;
+      });
+      
+      await Promise.all(censorshipPromises);
     }
+    
     console.log(`[검열 완료] 모든 파일(${files.length}개) 검열 통과`);
   } catch (e) {
     console.log("검열 과정에서 예상치 못한 오류 발생:", e);
@@ -366,7 +452,9 @@ async function handleUpload(request, env) {
     }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
 
-  // 2) R2 업로드
+  // 2) R2 업로드 (대용량 파일 최적화)
+  console.log(`[R2 업로드] 시작 - ${files.length}개 파일`);
+  
   let codes = [];
   if (customName && files.length === 1) {
     customName = customName.replace(/ /g, "_");
@@ -376,105 +464,221 @@ async function handleUpload(request, env) {
         error: '이미 사용 중인 이름입니다. 다른 이름을 선택해주세요.'
       }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
+    
     const buffer = await files[0].arrayBuffer();
+    console.log(`[R2 업로드] 커스텀 이름 "${customName}"으로 업로드 중...`);
+    
     await env.IMAGES.put(customName, buffer, {
       httpMetadata: { contentType: files[0].type }
     });
     codes.push(customName);
   } else {
-    for (const file of files) {
-      const code = await generateUniqueCode(env);
-      const buffer = await file.arrayBuffer();
-      await env.IMAGES.put(code, buffer, {
-        httpMetadata: { contentType: file.type }
+    // 대용량 파일의 경우 순차 업로드 (메모리 효율성)
+    const shouldUploadSequentially = largeFileCount > 0 || totalSize > 200 * 1024 * 1024; // 200MB 이상
+    
+    if (shouldUploadSequentially) {
+      console.log(`[R2 업로드] 순차 업로드 모드`);
+      
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const code = await generateUniqueCode(env);
+        const buffer = await file.arrayBuffer();
+        
+        console.log(`[R2 업로드] ${i + 1}/${files.length} - ${code} (${(buffer.byteLength / (1024 * 1024)).toFixed(2)}MB)`);
+        
+        await env.IMAGES.put(code, buffer, {
+          httpMetadata: { contentType: file.type }
+        });
+        codes.push(code);
+      }
+    } else {
+      console.log(`[R2 업로드] 병렬 업로드 모드`);
+      
+      // 기존 병렬 업로드 방식
+      const uploadPromises = files.map(async (file, index) => {
+        const code = await generateUniqueCode(env);
+        const buffer = await file.arrayBuffer();
+        
+        console.log(`[R2 업로드] ${index + 1}/${files.length} - ${code} (${(buffer.byteLength / (1024 * 1024)).toFixed(2)}MB)`);
+        
+        await env.IMAGES.put(code, buffer, {
+          httpMetadata: { contentType: file.type }
+        });
+        return code;
       });
-      codes.push(code);
+      
+      codes = await Promise.all(uploadPromises);
     }
   }
 
   const host = request.headers.get('host') || 'example.com';
   const finalUrl = `https://${host}/${codes.join(",")}`;
   const rawUrls = codes.map(code => `https://${host}/${code}?raw=1`);
-  console.log(">>> 업로드 완료 =>", finalUrl);
+  
+  console.log(`[업로드 완료] ${codes.length}개 파일 업로드 완료 =>`, finalUrl);
 
-  // API 응답에 추가 정보 포함
+  // API 응답에 추가 정보 포함 (대용량 파일 처리 정보)
   return new Response(JSON.stringify({ 
     success: true, 
     url: finalUrl,
     rawUrls: rawUrls,
     codes: codes,
-    fileTypes: files.map(file => file.type)
+    fileTypes: files.map(file => file.type),
+    fileSizes: files.map(file => file.size),
+    totalSize: totalSize,
+    processingInfo: {
+      largeFileCount: largeFileCount,
+      totalSizeMB: (totalSize / (1024 * 1024)).toFixed(2),
+      processedSequentially: largeFileCount > 0 || totalSize > 100 * 1024 * 1024
+    }
   }), {
     headers: { 'Content-Type': 'application/json' }
   });
 }
 
-// 이미지 검열 - Qwen 2.5 VL 72B Instruct API 사용
+// 이미지 검열 - Gemini API 사용 (대용량 파일 최적화)
 async function handleImageCensorship(file, env) {
   try {
-    const qwenApiKey = env.QWEN_API_KEY;
-    if (!qwenApiKey) {
+    const buf = await file.arrayBuffer();
+    const base64 = arrayBufferToBase64(buf);
+    const geminiApiKey = env.GEMINI_API_KEY;
+    if (!geminiApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'Qwen API 키가 설정되지 않았습니다.'
+          success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
 
-    // 이미지를 임시 버킷에 업로드
-    const imageUrl = await uploadImageToTempBucket(file, env);
-    if (!imageUrl) {
-      const errorMsg = !env.TEMP_BUCKET ? 
-        'TEMP_BUCKET이 바인딩되지 않았습니다. Cloudflare Workers 설정에서 TEMP_BUCKET 바인딩을 확인해주세요.' :
-        '이미지 임시 업로드에 실패했습니다. 버킷 설정을 확인해주세요.';
-      
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: errorMsg
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
-      };
-    }
-
-    const requestBody = {
-      model: "qwen2.5-vl-72b-instruct",
-      messages: [{
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
-                  "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
-                  "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-                  "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-                  "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-                  "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-                  "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-                  "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-                  "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-                  "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
-                  "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-                  "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-                  "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-                  "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-                  "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-                  "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-                  "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-                  "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-          },
-          {
-            type: "image_url",
-            image_url: {
-              url: imageUrl
-            }
+    let imageBase64 = base64;
+    let fileSizeMB = buf.byteLength / (1024 * 1024);
+    
+    console.log(`[이미지 검열] 원본 파일 크기: ${fileSizeMB.toFixed(2)}MB`);
+    
+    // 대용량 파일 처리 최적화: 10MB 이하가 될 때까지 반복 리사이징
+    if (fileSizeMB > 1) { // 1MB 이상이면 리사이징
+      try {
+        console.log(`[이미지 리사이징] ${fileSizeMB.toFixed(2)}MB 파일 리사이징 시작`);
+        
+        let currentBase64 = base64;
+        let currentSize = fileSizeMB;
+        let attempt = 0;
+        const maxAttempts = 10; // 최대 10번 시도
+        
+        while (currentSize > 10 && attempt < maxAttempts) {
+          attempt++;
+          
+          // 파일 크기에 따라 더 적극적인 리사이징 전략
+          let maxWidth, maxHeight, quality;
+          
+          if (currentSize > 100) {
+            maxWidth = 400;
+            maxHeight = 400;
+            quality = 60;
+          } else if (currentSize > 50) {
+            maxWidth = 512;
+            maxHeight = 512;
+            quality = 65;
+          } else if (currentSize > 30) {
+            maxWidth = 600;
+            maxHeight = 600;
+            quality = 70;
+          } else if (currentSize > 20) {
+            maxWidth = 800;
+            maxHeight = 800;
+            quality = 75;
+          } else if (currentSize > 10) {
+            maxWidth = 1000;
+            maxHeight = 1000;
+            quality = 80;
+          } else {
+            break; // 10MB 이하면 중단
           }
+          
+          console.log(`[이미지 리사이징] 시도 ${attempt}/${maxAttempts} - 목표: ${maxWidth}x${maxHeight}, 품질: ${quality}%`);
+          
+          const dataUrl = `data:${file.type};base64,${currentBase64}`;
+          const resizedResp = await fetch(new Request(dataUrl, {
+            cf: { 
+              image: { 
+                width: maxWidth, 
+                height: maxHeight, 
+                fit: "scale-down", // 비율 유지하면서 축소
+                quality: quality
+              } 
+            }
+          }));
+          
+          if (resizedResp.ok) {
+            const resizedBuf = await resizedResp.blob().then(b => b.arrayBuffer());
+            const resizedSizeMB = resizedBuf.byteLength / (1024 * 1024);
+            
+            if (resizedSizeMB < currentSize) {
+              currentBase64 = arrayBufferToBase64(resizedBuf);
+              currentSize = resizedSizeMB;
+              console.log(`[이미지 리사이징] 시도 ${attempt} 완료: ${currentSize.toFixed(2)}MB`);
+            } else {
+              console.log(`[이미지 리사이징] 시도 ${attempt} 실패: 크기 감소 없음`);
+              break;
+            }
+          } else {
+            console.log(`[이미지 리사이징] 시도 ${attempt} 실패: HTTP ${resizedResp.status}`);
+            break;
+          }
+        }
+        
+        // 최종 결과 적용
+        if (currentSize < fileSizeMB) {
+          imageBase64 = currentBase64;
+          console.log(`[이미지 리사이징] 최종 완료: ${fileSizeMB.toFixed(2)}MB → ${currentSize.toFixed(2)}MB (${attempt}회 시도)`);
+        } else {
+          console.log(`[이미지 리사이징] 실패, 원본 사용`);
+        }
+      } catch (e) {
+        console.log("[이미지 리사이징] 오류:", e);
+      }
+    }
+
+    // 모든 파일에 대해 동일한 상세한 검열 수행
+    const requestBody = {
+      contents: [{
+        parts: [
+          { text: "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+            "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
+            "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+            "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+            "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+            "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+            "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+            "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+            "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
+            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+            "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+          },
+          { inlineData: { mimeType: file.type, data: imageBase64 } }
         ]
       }],
-      temperature: 0.05,
-      max_tokens: 400
+      generationConfig: { 
+        temperature: 0.05, 
+        topK: 20, 
+        topP: 0.8, 
+        maxOutputTokens: 400,
+        thinkingConfig: {
+          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
+        }
+      }
     };
 
-    const analysis = await callQwenAPI(qwenApiKey, requestBody);
+    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
     if (!analysis.success) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: `Qwen API 호출 오류: ${analysis.error}`
+          success: false, error: `Gemini API 호출 오류: ${analysis.error}`
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
@@ -487,39 +691,30 @@ async function handleImageCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-        model: "qwen2.5-vl-72b-instruct",
-        messages: [{
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-                    "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
-                    "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: imageUrl
-              }
-            }
+        contents: [{
+          parts: [
+            { text:
+              "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+              "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
+              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+             },
+            { inlineData: { mimeType: file.type, data: imageBase64 } }
           ]
         }],
-        temperature: 0.0,
-        max_tokens: 50
+        generationConfig: { 
+          temperature: 0.0, 
+          topK: 10, 
+          topP: 0.7, 
+          maxOutputTokens: 50
+        }
       };
       
-      const reReview = await callQwenAPI(qwenApiKey, reReviewBody);
+      const reReview = await callGeminiAPI(geminiApiKey, reReviewBody);
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-        // 임시 이미지 정리
-        await cleanupTempImage(imageUrl, env);
         return { ok: true };
       }
     }
-    
-    // 임시 이미지 정리
-    await cleanupTempImage(imageUrl, env);
     
     if (bad.isInappropriate) {
       console.log(`[검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
@@ -538,76 +733,245 @@ async function handleImageCensorship(file, env) {
   }
 }
 
-// 동영상 검열 - Qwen 2.5 VL 72B Instruct API 사용
+// 동영상 검열 - Gemini Video 파일 업로드 API 사용 (대용량 파일 최적화)
 async function handleVideoCensorship(file, env) {
   try {
-    console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
-    const qwenApiKey = env.QWEN_API_KEY;
-    if (!qwenApiKey) {
+    const fileSizeMB = file.size / (1024 * 1024);
+    console.log(`[비디오 검열] 파일 크기: ${fileSizeMB.toFixed(2)}MB`);
+    
+    const geminiApiKey = env.GEMINI_API_KEY;
+    if (!geminiApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'Qwen API 키가 설정되지 않았습니다.'
+          success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
 
-    // 동영상을 임시 버킷에 업로드
-    const videoUrl = await uploadVideoToTempBucket(file, env);
-    if (!videoUrl) {
-      const errorMsg = !env.TEMP_BUCKET ? 
-        'TEMP_BUCKET이 바인딩되지 않았습니다. Cloudflare Workers 설정에서 TEMP_BUCKET 바인딩을 확인해주세요.' :
-        '동영상 임시 업로드에 실패했습니다. 버킷 설정을 확인해주세요.';
-      
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: errorMsg
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
-      };
-    }
-
-    const requestBody = {
-      model: "qwen2.5-vl-72b-instruct",
-      messages: [{
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
-                  "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
-                  "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-                  "Consider the entire video duration and any content that appears briefly. " +
-                  "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-                  "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-                  "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-                  "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-                  "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-                  "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-                  "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
-                  "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-                  "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-                  "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-                  "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-                  "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-                  "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-                  "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-                  "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-          },
-          {
-            type: "image_url",
-            image_url: {
-              url: videoUrl
-            }
+    // 대용량 파일 처리 최적화: 더 긴 타임아웃과 재시도 로직
+    const maxRetries = fileSizeMB > 100 ? 5 : 3;
+    const baseTimeout = fileSizeMB > 100 ? 120000 : 60000; // 2분 또는 1분
+    
+    let uploadUrl;
+    let uploadResult;
+    
+    // 1) Resumable upload 시작 (재시도 로직 추가)
+    for (let retry = 0; retry < maxRetries; retry++) {
+      try {
+        console.log(`[비디오 업로드] 시작 (${retry + 1}/${maxRetries})`);
+        
+        const startResp = await fetch(
+          `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
+          { 
+            method: 'POST',
+            headers: {
+              'X-Goog-Upload-Protocol': 'resumable',
+              'X-Goog-Upload-Command': 'start',
+              'X-Goog-Upload-Header-Content-Length': file.size,
+              'X-Goog-Upload-Header-Content-Type': file.type,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ 
+              file: { 
+                display_name: `video_upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}` 
+              } 
+            })
           }
+        );
+        
+        if (!startResp.ok) {
+          if (retry === maxRetries - 1) {
+            const err = await startResp.text();
+            throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
+          }
+          console.log(`[비디오 업로드] 재시도 ${retry + 1}: ${startResp.status}`);
+          await new Promise(r => setTimeout(r, Math.pow(2, retry) * 1000)); // 지수적 백오프
+          continue;
+        }
+        
+        uploadUrl = startResp.headers.get('X-Goog-Upload-URL') || startResp.headers.get('Location');
+        
+        if (!uploadUrl) {
+          const json = await startResp.json().catch(() => null);
+          uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
+        }
+        
+        if (!uploadUrl) {
+          if (retry === maxRetries - 1) {
+            const hdrs = [...startResp.headers].map(([k, v]) => `${k}: ${v}`).join('\n');
+            const textBody = await startResp.text().catch(() => '');
+            throw new Error(`Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디:\n${textBody}`);
+          }
+          console.log(`[비디오 업로드] URL 획득 실패, 재시도 ${retry + 1}`);
+          await new Promise(r => setTimeout(r, Math.pow(2, retry) * 1000));
+          continue;
+        }
+        
+        break; // 성공하면 루프 종료
+      } catch (e) {
+        if (retry === maxRetries - 1) throw e;
+        console.log(`[비디오 업로드] 시작 오류 (재시도 ${retry + 1}):`, e.message);
+        await new Promise(r => setTimeout(r, Math.pow(2, retry) * 1000));
+      }
+    }
+
+    // 2) 파일 업로드 및 finalize (청크 업로드 지원)
+    const buffer = await file.arrayBuffer();
+    const chunkSize = Math.max(1024 * 1024, Math.min(8 * 1024 * 1024, buffer.byteLength / 10)); // 1MB~8MB 또는 파일의 1/10
+    
+    if (buffer.byteLength > chunkSize && fileSizeMB > 50) {
+      console.log(`[비디오 업로드] 청크 업로드 시작: ${Math.ceil(buffer.byteLength / chunkSize)}개 청크`);
+      
+      // 청크별 업로드
+      for (let offset = 0; offset < buffer.byteLength; offset += chunkSize) {
+        const chunk = buffer.slice(offset, Math.min(offset + chunkSize, buffer.byteLength));
+        const isLastChunk = offset + chunkSize >= buffer.byteLength;
+        
+        const uploadCommand = isLastChunk ? 'upload, finalize' : 'upload';
+        
+        for (let retry = 0; retry < 3; retry++) {
+          try {
+            const uploadResp = await fetch(uploadUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Length': chunk.byteLength,
+                'X-Goog-Upload-Offset': offset,
+                'X-Goog-Upload-Command': uploadCommand
+              },
+              body: chunk
+            });
+            
+            if (!uploadResp.ok) {
+              if (retry === 2) {
+                const err = await uploadResp.text();
+                throw new Error(`비디오 청크 업로드 실패: ${uploadResp.status} ${err}`);
+              }
+              console.log(`[비디오 업로드] 청크 재시도 ${retry + 1}: ${uploadResp.status}`);
+              await new Promise(r => setTimeout(r, 1000 * (retry + 1)));
+              continue;
+            }
+            
+            if (isLastChunk) {
+              uploadResult = await uploadResp.json();
+            }
+            
+            console.log(`[비디오 업로드] 청크 ${Math.floor(offset / chunkSize) + 1}/${Math.ceil(buffer.byteLength / chunkSize)} 완료`);
+            break;
+          } catch (e) {
+            if (retry === 2) throw e;
+            console.log(`[비디오 업로드] 청크 오류 (재시도 ${retry + 1}):`, e.message);
+            await new Promise(r => setTimeout(r, 1000 * (retry + 1)));
+          }
+        }
+      }
+    } else {
+      // 일반 업로드
+      const uploadResp = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Length': file.size,
+          'X-Goog-Upload-Offset': '0',
+          'X-Goog-Upload-Command': 'upload, finalize'
+        },
+        body: buffer
+      });
+      
+      if (!uploadResp.ok) {
+        const err = await uploadResp.text();
+        throw new Error(`비디오 업로드 실패: ${uploadResp.status} ${err}`);
+      }
+      
+      uploadResult = await uploadResp.json();
+    }
+
+    // 3) 업로드 완료 응답에서 resource name 추출
+    const resourceName = uploadResult.file?.name;
+    if (!resourceName) {
+      throw new Error(`업로드 완료 후 resource name을 확인할 수 없습니다. 응답: ${JSON.stringify(uploadResult)}`);
+    }
+    
+    // 4) 처리 완료 대기 (PROCESSING → ACTIVE) - 대용량 파일용 더 긴 대기 시간
+    const statusUrl = uploadResult.file?.uri + `?key=${env.GEMINI_API_KEY}`;
+    const maxWaitTime = Math.max(300000, fileSizeMB * 2000); // 최소 5분 또는 파일 크기당 2초
+    const startTime = Date.now();
+    
+    let statusResp = await fetch(statusUrl);
+    if (!statusResp.ok) {
+      throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
+    }
+    
+    let myfile = await statusResp.json();
+    let waitCount = 0;
+    
+    while (myfile.state === 'PROCESSING') {
+      const elapsed = Date.now() - startTime;
+      if (elapsed > maxWaitTime) {
+        throw new Error(`비디오 처리 시간 초과 (${Math.round(elapsed / 1000)}초). 파일이 너무 크거나 복잡할 수 있습니다.`);
+      }
+      
+      // 대용량 파일의 경우 더 긴 대기 간격
+      const waitInterval = fileSizeMB > 100 ? 15000 : (fileSizeMB > 50 ? 10000 : 5000);
+      
+      console.log(`[비디오 처리] 대기 중... ${++waitCount}회 (${Math.round(elapsed / 1000)}초 경과)`);
+      await new Promise(r => setTimeout(r, waitInterval));
+      
+      statusResp = await fetch(statusUrl);
+      if (!statusResp.ok) {
+        throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
+      }
+      myfile = await statusResp.json();
+    }
+    
+    if (myfile.state !== 'ACTIVE') {
+      throw new Error(`비디오 파일이 활성 상태가 아닙니다: ${myfile.state}`);
+    }
+    
+    console.log(`[비디오 처리] 완료 (${Math.round((Date.now() - startTime) / 1000)}초)`);
+
+    // 5) 검열 요청 - 모든 파일에 대해 동일한 상세한 검열 수행
+    const fileUri = uploadResult.file.uri;
+    
+    const requestBody = {
+      contents: [{
+        parts: [
+          { text: "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
+            "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
+            "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+            "Consider the entire video duration and any content that appears briefly. " +
+            "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+            "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+            "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+            "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+            "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+            "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
+            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+            "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+          },
+          { file_data: { mime_type: file.type, file_uri: fileUri } }
         ]
       }],
-      temperature: 0.05,
-      max_tokens: 400
+      generationConfig: { 
+        temperature: 0.05, 
+        topK: 20, 
+        topP: 0.8, 
+        maxOutputTokens: 400,
+        thinkingConfig: {
+          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
+        }
+      }
     };
-
-    const analysis = await callQwenAPI(qwenApiKey, requestBody);
+    
+    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
     if (!analysis.success) {
-      await cleanupTempVideo(videoUrl, env);
       throw new Error(analysis.error);
     }
-
+    
     const bad = isInappropriateContent(analysis.text);
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
@@ -616,38 +980,30 @@ async function handleVideoCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-        model: "qwen2.5-vl-72b-instruct",
-        messages: [{
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-                    "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
-                    "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: videoUrl
-              }
-            }
+        contents: [{
+          parts: [
+            { text:
+              "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+              "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
+              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+             },
+            { file_data: { mime_type: file.type, file_uri: fileUri } }
           ]
         }],
-        temperature: 0.0,
-        max_tokens: 50
+        generationConfig: { 
+          temperature: 0.0, 
+          topK: 10, 
+          topP: 0.7, 
+          maxOutputTokens: 50
+        }
       };
       
-      const reReview = await callQwenAPI(qwenApiKey, reReviewBody);
+      const reReview = await callGeminiAPI(geminiApiKey, reReviewBody);
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-        await cleanupTempVideo(videoUrl, env);
         return { ok: true };
       }
     }
-    
-    // 임시 동영상 정리
-    await cleanupTempVideo(videoUrl, env);
     
     if (bad.isInappropriate) {
       console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
@@ -655,6 +1011,7 @@ async function handleVideoCensorship(file, env) {
           success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
         }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
     }
+    
     return { ok: true };
   } catch (e) {
     console.log('handleVideoCensorship 오류:', e);
@@ -664,160 +1021,154 @@ async function handleVideoCensorship(file, env) {
   }
 }
 
-// Qwen 공식 API 호출 함수 (Alibaba Cloud DashScope)
-async function callQwenAPI(apiKey, requestBody) {
+// Gemini API 호출 함수 (대용량 파일 최적화)
+async function callGeminiAPI(apiKey, requestBody) {
+  const maxRetries = 5; // 재시도 횟수 증가
+  const baseRetryDelay = 2000; // 기본 지연 시간
+  const maxRetryDelay = 30000; // 최대 지연 시간
+  
+  // 요청 크기 추정 (대용량 파일 처리 시 더 긴 타임아웃)
+  const isLargeRequest = JSON.stringify(requestBody).length > 1000000; // 1MB 이상
+  const baseTimeout = isLargeRequest ? 180000 : 60000; // 3분 또는 1분
+  
   let retryCount = 0;
-  const maxRetries = 3, retryDelay = 2000;
+  
   while (retryCount < maxRetries) {
     try {
-      // Qwen 공식 API 엔드포인트 (Alibaba Cloud DashScope)
-      const apiUrl = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions';
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), baseTimeout + (retryCount * 30000));
+      
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      
+      console.log(`[Gemini API] 호출 시도 ${retryCount + 1}/${maxRetries}${isLargeRequest ? ' (대용량 요청)' : ''}`);
+      
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
+          'User-Agent': 'CloudflareWorker/1.0' // 더 안정적인 요청을 위한 User-Agent
         },
-        body: JSON.stringify(requestBody)
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
       });
       
+      clearTimeout(timeoutId);
+      
       if (!response.ok) {
-        if (response.status === 429 && retryCount < maxRetries - 1) {
+        const errorText = await response.text();
+        
+        // 특정 오류 코드에 따른 처리
+        if (response.status === 429) {
+          // 요청 제한 - 더 긴 대기 시간
+          const waitTime = Math.min(baseRetryDelay * Math.pow(2, retryCount) + Math.random() * 1000, maxRetryDelay);
+          console.log(`[Gemini API] 요청 제한 (429), ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
+          await new Promise(r => setTimeout(r, waitTime));
           retryCount++;
-          console.log(`할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
-          await new Promise(r => setTimeout(r, retryDelay));
           continue;
+        } else if (response.status === 503 || response.status === 502 || response.status === 500) {
+          // 서버 오류 - 재시도
+          const waitTime = Math.min(baseRetryDelay * Math.pow(1.5, retryCount), maxRetryDelay);
+          console.log(`[Gemini API] 서버 오류 (${response.status}), ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
+          await new Promise(r => setTimeout(r, waitTime));
+          retryCount++;
+          continue;
+        } else if (response.status === 400) {
+          // 잘못된 요청 - 재시도하지 않음
+          console.log(`[Gemini API] 잘못된 요청 (400):`, errorText);
+          return { success: false, error: `잘못된 요청: ${errorText}` };
+        } else if (response.status === 413) {
+          // 요청 크기 초과 - 재시도하지 않음
+          console.log(`[Gemini API] 요청 크기 초과 (413):`, errorText);
+          return { success: false, error: `요청 크기가 너무 큽니다. 파일 크기를 줄여주세요.` };
+        } else {
+          // 기타 오류
+          console.log(`[Gemini API] 호출 실패 (${response.status}):`, errorText);
+          return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
         }
-        console.log('Qwen API 호출 실패:', {
-          status: response.status,
-          statusText: response.statusText,
-          headers: Object.fromEntries([...response.headers])
-        });
-        const errText = await response.text();
-        return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
       
       const data = await response.json();
       
-      // OpenAI 호환 응답 구조 처리
-      const choice = data.choices?.[0];
-      if (!choice?.message?.content) {
-        console.log('Qwen API 응답 상태:', {
-          hasChoices: !!data.choices,
-          choicesLength: data.choices?.length || 0,
-          hasMessage: !!choice?.message,
-          hasContent: !!choice?.message?.content,
-          responseKeys: Object.keys(data || {})
+      // Gemini 2.5 Flash의 새로운 응답 구조 처리
+      const candidate = data.candidates?.[0];
+      if (!candidate?.content?.parts) {
+        console.log(`[Gemini API] 응답 구조 오류:`, {
+          hasCandidates: !!data.candidates,
+          candidatesLength: data.candidates?.length || 0,
+          hasContent: !!candidate?.content,
+          hasParts: !!candidate?.content?.parts,
+          responseKeys: Object.keys(data || {}),
+          fullResponse: data
         });
-        return { success: false, error: 'Qwen API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
+        
+        // 응답 구조 문제가 있을 경우 재시도
+        if (retryCount < maxRetries - 1) {
+          const waitTime = Math.min(baseRetryDelay * Math.pow(1.2, retryCount), maxRetryDelay);
+          console.log(`[Gemini API] 응답 구조 문제, ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
+          await new Promise(r => setTimeout(r, waitTime));
+          retryCount++;
+          continue;
+        }
+        
+        return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
 
-      const responseText = choice.message.content;
+      // parts 배열에서 실제 응답 텍스트 찾기 (thought가 false이거나 없는 것)
+      let responseText = '';
+      for (const part of candidate.content.parts) {
+        if (part.text && (!part.thought || part.thought === false)) {
+          responseText += part.text;
+        }
+      }
+
+      // 실제 응답 텍스트가 없으면 첫 번째 텍스트 사용 (하위 호환성)
+      if (!responseText && candidate.content.parts[0]?.text) {
+        responseText = candidate.content.parts[0].text;
+      }
+
       if (!responseText) {
-        console.log('Qwen API 응답 파싱 실패:', {
-          message: choice.message
+        console.log(`[Gemini API] 응답 텍스트 추출 실패:`, {
+          partsCount: candidate.content.parts.length,
+          parts: candidate.content.parts.map(p => ({ hasText: !!p.text, thought: p.thought, textLength: p.text?.length || 0 }))
         });
-        return { success: false, error: 'Qwen API 응답에서 텍스트를 추출할 수 없습니다.' };
+        
+        // 텍스트 추출 실패 시 재시도
+        if (retryCount < maxRetries - 1) {
+          const waitTime = Math.min(baseRetryDelay * Math.pow(1.2, retryCount), maxRetryDelay);
+          console.log(`[Gemini API] 텍스트 추출 실패, ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
+          await new Promise(r => setTimeout(r, waitTime));
+          retryCount++;
+          continue;
+        }
+        
+        return { success: false, error: 'Gemini API 응답에서 텍스트를 추출할 수 없습니다.' };
       }
 
+      console.log(`[Gemini API] 성공 - 응답 길이: ${responseText.length}자`);
       return { success: true, text: responseText };
+      
     } catch (e) {
-      retryCount++;
-      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
-      if (retryCount < maxRetries) {
-        await new Promise(r => setTimeout(r, retryDelay));
+      console.log(`[Gemini API] 오류 (시도 ${retryCount + 1}/${maxRetries}):`, e.message);
+      
+      // 네트워크 오류나 타임아웃의 경우 재시도
+      if (e.name === 'AbortError') {
+        console.log(`[Gemini API] 요청 타임아웃 (${baseTimeout + (retryCount * 30000)}ms)`);
+      } else if (e.message.includes('fetch')) {
+        console.log(`[Gemini API] 네트워크 오류`);
+      }
+      
+      if (retryCount < maxRetries - 1) {
+        const waitTime = Math.min(baseRetryDelay * Math.pow(2, retryCount) + Math.random() * 1000, maxRetryDelay);
+        console.log(`[Gemini API] ${Math.round(waitTime / 1000)}초 대기 후 재시도`);
+        await new Promise(r => setTimeout(r, waitTime));
+        retryCount++;
       } else {
         return { success: false, error: `API 호출 오류: ${e.message}` };
       }
     }
   }
+  
   return { success: false, error: '최대 재시도 횟수 초과' };
-}
-
-// =======================
-// 임시 버킷 관련 함수들
-// =======================
-
-// 이미지를 임시 버킷에 업로드하고 URL 반환
-async function uploadImageToTempBucket(file, env) {
-  try {
-    // TEMP_BUCKET 바인딩 확인
-    if (!env.TEMP_BUCKET) {
-      console.log('TEMP_BUCKET 바인딩이 설정되지 않았습니다.');
-      return null;
-    }
-
-    const tempKey = `temp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    const buffer = await file.arrayBuffer();
-    
-    await env.TEMP_BUCKET.put(tempKey, buffer, {
-      httpMetadata: { contentType: file.type }
-    });
-    
-    // 임시 버킷의 공개 URL 생성
-    // TEMP_BUCKET_URL이 설정되지 않은 경우 기본값 사용
-    const tempUrl = env.TEMP_BUCKET_URL ? 
-      `${env.TEMP_BUCKET_URL}/${tempKey}` : 
-      `https://temp-bucket.example.com/${tempKey}`;
-    
-    console.log(`임시 이미지 업로드 완료: ${tempKey}`);
-    return tempUrl;
-  } catch (e) {
-    console.log('이미지 임시 업로드 오류:', e);
-    return null;
-  }
-}
-
-// 동영상을 임시 버킷에 업로드하고 URL 반환
-async function uploadVideoToTempBucket(file, env) {
-  try {
-    // TEMP_BUCKET 바인딩 확인
-    if (!env.TEMP_BUCKET) {
-      console.log('TEMP_BUCKET 바인딩이 설정되지 않았습니다.');
-      return null;
-    }
-
-    const tempKey = `temp_video_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    const buffer = await file.arrayBuffer();
-    
-    await env.TEMP_BUCKET.put(tempKey, buffer, {
-      httpMetadata: { contentType: file.type }
-    });
-    
-    // 임시 버킷의 공개 URL 생성
-    // TEMP_BUCKET_URL이 설정되지 않은 경우 기본값 사용
-    const tempUrl = env.TEMP_BUCKET_URL ? 
-      `${env.TEMP_BUCKET_URL}/${tempKey}` : 
-      `https://temp-bucket.example.com/${tempKey}`;
-    
-    console.log(`임시 동영상 업로드 완료: ${tempKey}`);
-    return tempUrl;
-  } catch (e) {
-    console.log('동영상 임시 업로드 오류:', e);
-    return null;
-  }
-}
-
-// 임시 이미지 정리
-async function cleanupTempImage(imageUrl, env) {
-  try {
-    const tempKey = imageUrl.split('/').pop();
-    await env.TEMP_BUCKET.delete(tempKey);
-    console.log(`임시 이미지 정리 완료: ${tempKey}`);
-  } catch (e) {
-    console.log('임시 이미지 정리 오류:', e);
-  }
-}
-
-// 임시 동영상 정리
-async function cleanupTempVideo(videoUrl, env) {
-  try {
-    const tempKey = videoUrl.split('/').pop();
-    await env.TEMP_BUCKET.delete(tempKey);
-    console.log(`임시 동영상 정리 완료: ${tempKey}`);
-  } catch (e) {
-    console.log('임시 동영상 정리 오류:', e);
-  }
 }
 
 // =======================
@@ -1627,7 +1978,7 @@ function renderApiDocs(host) {
     <h1>이미지 공유 API 문서</h1>
   </div>
   
-  <p>이 API는 외부 애플리케이션에서 이미지 및 동영상을 업로드하고 공유할 수 있는 기능을 제공합니다. 모든 콘텐츠는 Qwen 2.5 VL 72B Instruct 모델을 통한 자동 검열을 거칩니다.</p>
+  <p>이 API는 외부 애플리케이션에서 이미지 및 동영상을 업로드하고 공유할 수 있는 기능을 제공합니다. 모든 콘텐츠는 업로드 전 자동 검열됩니다.</p>
   
   <h2>엔드포인트</h2>
   
@@ -1690,7 +2041,7 @@ function renderApiDocs(host) {
     <p>서버 오류 (500 Internal Server Error):</p>
     <pre>{
   "success": false,
-  "error": "Qwen 검열 처리 중 오류: [오류 메시지]"
+  "error": "검열 처리 중 오류: [오류 메시지]"
 }</pre>
     
     <p>레이트 리미팅 (429 Too Many Requests):</p>
@@ -1761,8 +2112,7 @@ else:
   
   <h2>노트</h2>
   <ul>
-    <li>모든 업로드된 파일은 Qwen 2.5 VL 72B Instruct 모델을 사용한 자동 검열 시스템을 통과해야 합니다.</li>
-    <li>검열 과정에서 파일이 임시 버킷에 업로드되고, 검열 완료 후 자동으로 정리됩니다.</li>
+    <li>모든 업로드된 파일은 자동 검열 시스템을 통과해야 합니다.</li>
     <li>대용량 파일 업로드 시 서버 처리 시간이 길어질 수 있습니다.</li>
     <li>기본적으로 랜덤 코드가 생성되지만, <code>customName</code> 파라미터를 통해 사용자 지정 이름을 부여할 수 있습니다.</li>
     <li>동일한 사용자 지정 이름이 이미 존재하는 경우 업로드가 실패합니다.</li>
