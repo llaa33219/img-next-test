@@ -448,21 +448,44 @@ async function handleUpload(request, env) {
         const fileSizeMB = file.size / (1024 * 1024);
         console.log(`[검열 진행] ${index + 1}/${files.length} - ${file.name} (${fileSizeMB.toFixed(2)}MB)`);
         
-        const r = file.type.startsWith('image/')
-          ? await handleImageCensorship(file, env)
-          : await handleVideoCensorship(file, env);
+        try {
+          const r = file.type.startsWith('image/')
+            ? await handleImageCensorship(file, env)
+            : await handleVideoCensorship(file, env);
+            
+          if (!r.ok) {
+            console.log(`[검열 실패] ${index + 1}번째 파일 "${file.name}"에서 검열 실패`);
+            // 구체적인 실패 이유를 포함한 에러 반환
+            const errorMessage = r.response ? await r.response.text() : '알 수 없는 오류';
+            let errorDetail = '검열 실패';
+            try {
+              const errorJson = JSON.parse(errorMessage);
+              errorDetail = errorJson.error || errorDetail;
+            } catch (e) {
+              // JSON 파싱 실패 시 원본 메시지 사용
+              errorDetail = errorMessage.substring(0, 200); // 너무 길면 자르기
+            }
+            throw new Error(`검열 실패 (${file.name}): ${errorDetail}`);
+          } else {
+            console.log(`[검열 통과] ${index + 1}번째 파일 "${file.name}" 검열 통과`);
+          }
           
-        if (!r.ok) {
-          console.log(`[검열 실패] ${index + 1}번째 파일 "${file.name}"에서 검열 실패`);
-          throw new Error(`검열 실패: ${file.name}`);
-        } else {
-          console.log(`[검열 통과] ${index + 1}번째 파일 "${file.name}" 검열 통과`);
+          return r;
+        } catch (e) {
+          console.error(`[검열 오류] ${index + 1}번째 파일 "${file.name}" 처리 중 예외:`, e);
+          throw new Error(`검열 처리 오류 (${file.name}): ${e.message}`);
         }
-        
-        return r;
       });
       
-      await Promise.all(censorshipPromises);
+      try {
+        await Promise.all(censorshipPromises);
+      } catch (e) {
+        console.error(`[병렬 검열 실패] 전체 검열 프로세스 실패:`, e.message);
+        return new Response(JSON.stringify({
+          success: false,
+          error: `검열 처리 중 오류: ${e.message}`
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      }
     }
     
     console.log(`[검열 완료] 모든 파일(${files.length}개) 검열 통과`);
@@ -561,10 +584,54 @@ async function handleUpload(request, env) {
 // 이미지 검열 - Gemini API 사용 (대용량 파일 최적화)
 async function handleImageCensorship(file, env) {
   try {
-    console.log(`[이미지 검열 시작] 파일: ${file.name}, 타입: ${file.type}`);
+    console.log(`[이미지 검열 시작] 파일: ${file.name}, 타입: ${file.type}, 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
     
-    const buf = await file.arrayBuffer();
-    const base64 = arrayBufferToBase64(buf);
+    // 파일 유효성 검사
+    if (!file || !file.type || !file.size) {
+      const error = '파일 정보가 불완전합니다.';
+      console.error(`[이미지 검열] ${error}`, { name: file?.name, type: file?.type, size: file?.size });
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: error
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+      };
+    }
+    
+    // 이미지 타입 재확인
+    if (!file.type.startsWith('image/')) {
+      const error = `이미지가 아닌 파일입니다: ${file.type}`;
+      console.error(`[이미지 검열] ${error}`);
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: error
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+      };
+    }
+    
+    let buf;
+    try {
+      buf = await file.arrayBuffer();
+      console.log(`[이미지 검열] 파일 읽기 완료: ${buf.byteLength} bytes`);
+    } catch (e) {
+      const error = `파일 읽기 실패: ${e.message}`;
+      console.error(`[이미지 검열] ${error}`);
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: error
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      };
+    }
+    
+    let base64;
+    try {
+      base64 = arrayBufferToBase64(buf);
+      console.log(`[이미지 검열] Base64 변환 완료: ${base64.length} 문자`);
+    } catch (e) {
+      const error = `Base64 변환 실패: ${e.message}`;
+      console.error(`[이미지 검열] ${error}`);
+      return { ok: false, response: new Response(JSON.stringify({
+          success: false, error: error
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } })
+      };
+    }
+    
     const geminiApiKey = env.GEMINI_API_KEY;
     
     // API 키 체크 강화
@@ -778,6 +845,7 @@ async function handleImageCensorship(file, env) {
     return { ok: true };
   } catch (e) {
     console.error("handleImageCensorship 치명적 오류:", e);
+    console.error("오류 스택:", e.stack);
     // 검열 실패 시 안전장치: 업로드 차단
     return { ok: false, response: new Response(JSON.stringify({
         success: false, error: `이미지 검열 중 오류 발생: ${e.message}. 보안상 업로드가 차단됩니다.`
