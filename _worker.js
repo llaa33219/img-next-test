@@ -421,95 +421,156 @@ async function handleImageCensorship(file, env) {
       };
     }
 
-    // 1) Resumable upload 시작
-    const startResp = await fetch(
-      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
-      { method: 'POST',
-        headers: {
-          'X-Goog-Upload-Protocol': 'resumable',
-          'X-Goog-Upload-Command': 'start',
-          'X-Goog-Upload-Header-Content-Length': file.size,
-          'X-Goog-Upload-Header-Content-Type': file.type,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ file: { display_name: 'image_upload' } })
-      }
-    );
-    if (!startResp.ok) {
-      const err = await startResp.text();
-      throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
-    }
-    let uploadUrl =
-      startResp.headers.get('X-Goog-Upload-URL') ||
-      startResp.headers.get('Location');
 
-    if (!uploadUrl) {
-      // Response 본문을 두 번 읽으려면 clone() 사용
-      const cloneForJson = startResp.clone();
-      const cloneForText = startResp.clone();
 
-      // JSON 바디에서 가능한 필드 확인
-      const json = await cloneForJson.json().catch(() => null);
-      uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
+    let uploadUrl, uploadResult, fileUri;
 
-      if (!uploadUrl) {
-        const hdrs = [...startResp.headers]
-          .map(([k, v]) => `${k}: ${v}`)
-          .join('\n');
-        const textBody = await cloneForText.text().catch(() => '');
-        throw new Error(
-          `Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디:\n${textBody}`
+    // 1) Resumable upload 시작 (재시도 로직 포함)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`[이미지 업로드 시작] 시도 ${attempt}/3`);
+        const startResp = await fetch(
+          `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
+          { method: 'POST',
+            headers: {
+              'X-Goog-Upload-Protocol': 'resumable',
+              'X-Goog-Upload-Command': 'start',
+              'X-Goog-Upload-Header-Content-Length': file.size,
+              'X-Goog-Upload-Header-Content-Type': file.type,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ file: { display_name: 'image_upload' } })
+          }
         );
+        
+        if (!startResp.ok) {
+          const err = await startResp.text();
+          if (startResp.status === 401) {
+            throw new Error('API 키가 유효하지 않습니다.');
+          } else if (startResp.status === 403) {
+            throw new Error('API 키에 Files API 접근 권한이 없습니다.');
+          } else if (startResp.status === 429) {
+            if (attempt < 3) {
+              console.log(`[할당량 초과] ${attempt}회 재시도 중...`);
+              await new Promise(r => setTimeout(r, 2000 * attempt));
+              continue;
+            }
+            throw new Error('API 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+          } else {
+            throw new Error(`업로드 시작 실패 (${startResp.status}): ${err}`);
+          }
+        }
+        
+        uploadUrl = startResp.headers.get('X-Goog-Upload-URL') || startResp.headers.get('Location');
+        
+        if (!uploadUrl) {
+          const json = await startResp.json().catch(() => null);
+          uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
+          
+          if (!uploadUrl) {
+            throw new Error('업로드 URL을 가져올 수 없습니다.');
+          }
+        }
+        
+        console.log(`[이미지 업로드 URL 획득] 성공`);
+        break;
+      } catch (error) {
+        if (attempt === 3) throw error;
+        console.log(`[이미지 업로드 시작 실패] 시도 ${attempt}/3: ${error.message}`);
+        await new Promise(r => setTimeout(r, 1000 * attempt));
       }
     }
 
-    // 2) 파일 업로드 및 finalize
-    const buffer = await file.arrayBuffer();
-    const uploadResp = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Length': file.size,
-        'X-Goog-Upload-Offset': '0',
-        'X-Goog-Upload-Command': 'upload, finalize'
-      },
-      body: buffer
-    });
-    if (!uploadResp.ok) {
-      const err = await uploadResp.text();
-      throw new Error(`이미지 업로드 실패: ${uploadResp.status} ${err}`);
-    }
-
-    // 3) 업로드 완료 응답에서 resource name 추출
-    const uploadResult = await uploadResp.json();
-    const resourceName = uploadResult.file?.name;
-    if (!resourceName) {
-      throw new Error(
-        `업로드 완료 후 resource name을 확인할 수 없습니다. 응답: ${JSON.stringify(uploadResult)}`
-      );
-    }
-
-    // 4) 처리 완료 대기 (PROCESSING → ACTIVE)
-    const statusUrl = uploadResult.file?.uri + `?key=${env.GEMINI_API_KEY}`;
-    let statusResp = await fetch(statusUrl);
-    if (!statusResp.ok) {
-      throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
-    }
-    let myfile = await statusResp.json();
-    while (myfile.state === 'PROCESSING') {
-      console.log('이미지 처리 중...');
-      await new Promise(r => setTimeout(r, 3000));
-      statusResp = await fetch(statusUrl);
-      if (!statusResp.ok) {
-        throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
+    // 2) 파일 업로드 및 finalize (재시도 로직 포함)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`[이미지 파일 업로드] 시도 ${attempt}/3`);
+        const buffer = await file.arrayBuffer();
+        const uploadResp = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Length': file.size,
+            'X-Goog-Upload-Offset': '0',
+            'X-Goog-Upload-Command': 'upload, finalize'
+          },
+          body: buffer
+        });
+        
+        if (!uploadResp.ok) {
+          const err = await uploadResp.text();
+          if (uploadResp.status === 413) {
+            throw new Error('파일 크기가 너무 큽니다.');
+          } else if (uploadResp.status === 429) {
+            if (attempt < 3) {
+              console.log(`[업로드 할당량 초과] ${attempt}회 재시도 중...`);
+              await new Promise(r => setTimeout(r, 2000 * attempt));
+              continue;
+            }
+            throw new Error('업로드 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+          } else {
+            throw new Error(`파일 업로드 실패 (${uploadResp.status}): ${err}`);
+          }
+        }
+        
+        uploadResult = await uploadResp.json();
+        if (!uploadResult.file?.name || !uploadResult.file?.uri) {
+          throw new Error('업로드 완료 후 파일 정보를 확인할 수 없습니다.');
+        }
+        
+        fileUri = uploadResult.file.uri;
+        console.log(`[이미지 파일 업로드] 성공`);
+        break;
+      } catch (error) {
+        if (attempt === 3) throw error;
+        console.log(`[이미지 파일 업로드 실패] 시도 ${attempt}/3: ${error.message}`);
+        await new Promise(r => setTimeout(r, 1000 * attempt));
       }
-      myfile = await statusResp.json();
     }
-    if (myfile.state !== 'ACTIVE') {
-      throw new Error(`이미지 파일이 활성 상태가 아닙니다: ${myfile.state}`);
+
+    // 3) 처리 완료 대기 (PROCESSING → ACTIVE) - 타임아웃 추가
+    const statusUrl = `${fileUri}?key=${geminiApiKey}`;
+    const maxWaitTime = 60000; // 60초
+    const startTime = Date.now();
+    
+    while (true) {
+      try {
+        const statusResp = await fetch(statusUrl);
+        if (!statusResp.ok) {
+          if (statusResp.status === 404) {
+            throw new Error('업로드된 파일을 찾을 수 없습니다.');
+          } else {
+            throw new Error(`파일 상태 조회 실패 (${statusResp.status})`);
+          }
+        }
+        
+        const myfile = await statusResp.json();
+        console.log(`[이미지 처리 상태] ${myfile.state}`);
+        
+        if (myfile.state === 'ACTIVE') {
+          console.log(`[이미지 처리 완료] 활성 상태 달성`);
+          break;
+        } else if (myfile.state === 'FAILED') {
+          throw new Error('파일 처리가 실패했습니다.');
+        } else if (myfile.state === 'PROCESSING') {
+          // 타임아웃 확인
+          if (Date.now() - startTime > maxWaitTime) {
+            throw new Error('파일 처리 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+          }
+          await new Promise(r => setTimeout(r, 3000));
+        } else {
+          throw new Error(`알 수 없는 파일 상태: ${myfile.state}`);
+        }
+      } catch (error) {
+        if (error.message.includes('타임아웃') || error.message.includes('찾을 수 없습니다')) {
+          throw error;
+        }
+        console.log(`[이미지 상태 조회 오류] ${error.message}, 재시도 중...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
     }
 
     // 5) 검열 요청
-    const fileUri = uploadResult.file.uri;
+    const imageFileUri = uploadResult.file.uri;
     const requestBody = {
       contents: [{
         parts: [
@@ -533,7 +594,7 @@ async function handleImageCensorship(file, env) {
             "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
             "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
            },
-          { file_data: { mime_type: file.type, file_uri: fileUri } }
+          { file_data: { mime_type: file.type, file_uri: imageFileUri } }
         ]
       }],
       generationConfig: { 
@@ -567,7 +628,7 @@ async function handleImageCensorship(file, env) {
               "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
               "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
              },
-            { file_data: { mime_type: file.type, file_uri: fileUri } }
+            { file_data: { mime_type: file.type, file_uri: imageFileUri } }
           ]
         }],
         generationConfig: { 
@@ -602,7 +663,7 @@ async function handleImageCensorship(file, env) {
   }
 }
 
-// 동영상 검열 - Gemini Video 파일 업로드 API 사용
+// 동영상 검열 - Files API 사용
 async function handleVideoCensorship(file, env) {
   try {
     console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
@@ -614,95 +675,155 @@ async function handleVideoCensorship(file, env) {
       };
     }
 
-    // 1) Resumable upload 시작
-    const startResp = await fetch(
-      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
-      { method: 'POST',
-        headers: {
-          'X-Goog-Upload-Protocol': 'resumable',
-          'X-Goog-Upload-Command': 'start',
-          'X-Goog-Upload-Header-Content-Length': file.size,
-          'X-Goog-Upload-Header-Content-Type': file.type,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ file: { display_name: 'video_upload' } })
-      }
-    );
-    if (!startResp.ok) {
-      const err = await startResp.text();
-      throw new Error(`Resumable upload start 실패: ${startResp.status} ${err}`);
-    }
-    let uploadUrl =
-      startResp.headers.get('X-Goog-Upload-URL') ||
-      startResp.headers.get('Location');
 
-    if (!uploadUrl) {
-      // Response 본문을 두 번 읽으려면 clone() 사용
-      const cloneForJson = startResp.clone();
-      const cloneForText = startResp.clone();
 
-      // JSON 바디에서 가능한 필드 확인
-      const json = await cloneForJson.json().catch(() => null);
-      uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
+    let uploadUrl, uploadResult, videoFileUri;
 
-      if (!uploadUrl) {
-        const hdrs = [...startResp.headers]
-          .map(([k, v]) => `${k}: ${v}`)
-          .join('\n');
-        const textBody = await cloneForText.text().catch(() => '');
-        throw new Error(
-          `Resumable 업로드 URL을 가져올 수 없습니다.\n응답 헤더:\n${hdrs}\n응답 바디:\n${textBody}`
+    // 1) Resumable upload 시작 (재시도 로직 포함)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`[동영상 업로드 시작] 시도 ${attempt}/3`);
+        const startResp = await fetch(
+          `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
+          { method: 'POST',
+            headers: {
+              'X-Goog-Upload-Protocol': 'resumable',
+              'X-Goog-Upload-Command': 'start',
+              'X-Goog-Upload-Header-Content-Length': file.size,
+              'X-Goog-Upload-Header-Content-Type': file.type,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ file: { display_name: 'video_upload' } })
+          }
         );
+        
+        if (!startResp.ok) {
+          const err = await startResp.text();
+          if (startResp.status === 401) {
+            throw new Error('API 키가 유효하지 않습니다.');
+          } else if (startResp.status === 403) {
+            throw new Error('API 키에 Files API 접근 권한이 없습니다.');
+          } else if (startResp.status === 429) {
+            if (attempt < 3) {
+              console.log(`[동영상 할당량 초과] ${attempt}회 재시도 중...`);
+              await new Promise(r => setTimeout(r, 3000 * attempt));
+              continue;
+            }
+            throw new Error('API 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+          } else {
+            throw new Error(`업로드 시작 실패 (${startResp.status}): ${err}`);
+          }
+        }
+        
+        uploadUrl = startResp.headers.get('X-Goog-Upload-URL') || startResp.headers.get('Location');
+        
+        if (!uploadUrl) {
+          const json = await startResp.json().catch(() => null);
+          uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
+          
+          if (!uploadUrl) {
+            throw new Error('업로드 URL을 가져올 수 없습니다.');
+          }
+        }
+        
+        console.log(`[동영상 업로드 URL 획득] 성공`);
+        break;
+      } catch (error) {
+        if (attempt === 3) throw error;
+        console.log(`[동영상 업로드 시작 실패] 시도 ${attempt}/3: ${error.message}`);
+        await new Promise(r => setTimeout(r, 2000 * attempt));
       }
     }
 
-    // 2) 파일 업로드 및 finalize
-    const buffer = await file.arrayBuffer();
-    const uploadResp = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Length': file.size,
-        'X-Goog-Upload-Offset': '0',
-        'X-Goog-Upload-Command': 'upload, finalize'
-      },
-      body: buffer
-    });
-    if (!uploadResp.ok) {
-      const err = await uploadResp.text();
-      throw new Error(`비디오 업로드 실패: ${uploadResp.status} ${err}`);
+    // 2) 파일 업로드 및 finalize (재시도 로직 포함)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`[동영상 파일 업로드] 시도 ${attempt}/3`);
+        const buffer = await file.arrayBuffer();
+        const uploadResp = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Length': file.size,
+            'X-Goog-Upload-Offset': '0',
+            'X-Goog-Upload-Command': 'upload, finalize'
+          },
+          body: buffer
+        });
+        
+        if (!uploadResp.ok) {
+          const err = await uploadResp.text();
+          if (uploadResp.status === 413) {
+            throw new Error('파일 크기가 너무 큽니다.');
+          } else if (uploadResp.status === 429) {
+            if (attempt < 3) {
+              console.log(`[동영상 업로드 할당량 초과] ${attempt}회 재시도 중...`);
+              await new Promise(r => setTimeout(r, 3000 * attempt));
+              continue;
+            }
+            throw new Error('업로드 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+          } else {
+            throw new Error(`파일 업로드 실패 (${uploadResp.status}): ${err}`);
+          }
+        }
+        
+        uploadResult = await uploadResp.json();
+        if (!uploadResult.file?.name || !uploadResult.file?.uri) {
+          throw new Error('업로드 완료 후 파일 정보를 확인할 수 없습니다.');
+        }
+        
+        videoFileUri = uploadResult.file.uri;
+        console.log(`[동영상 파일 업로드] 성공`);
+        break;
+      } catch (error) {
+        if (attempt === 3) throw error;
+        console.log(`[동영상 파일 업로드 실패] 시도 ${attempt}/3: ${error.message}`);
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
     }
 
-    // 3) 업로드 완료 응답에서 resource name 추출
-    const uploadResult = await uploadResp.json();
-    // file 객체 내부의 name 필드를 사용합니다.
-       const resourceName = uploadResult.file?.name;
-        if (!resourceName) {
-         throw new Error(
-           `업로드 완료 후 resource name을 확인할 수 없습니다. 응답: ${JSON.stringify(uploadResult)}`
-         );
+    // 3) 처리 완료 대기 (PROCESSING → ACTIVE) - 타임아웃 추가
+    const statusUrl = `${videoFileUri}?key=${geminiApiKey}`;
+    const maxWaitTime = 180000; // 3분 (동영상은 처리 시간이 더 오래 걸림)
+    const startTime = Date.now();
+    
+    while (true) {
+      try {
+        const statusResp = await fetch(statusUrl);
+        if (!statusResp.ok) {
+          if (statusResp.status === 404) {
+            throw new Error('업로드된 파일을 찾을 수 없습니다.');
+          } else {
+            throw new Error(`파일 상태 조회 실패 (${statusResp.status})`);
+          }
+        }
+        
+        const myfile = await statusResp.json();
+        console.log(`[동영상 처리 상태] ${myfile.state}`);
+        
+        if (myfile.state === 'ACTIVE') {
+          console.log(`[동영상 처리 완료] 활성 상태 달성`);
+          break;
+        } else if (myfile.state === 'FAILED') {
+          throw new Error('파일 처리가 실패했습니다.');
+        } else if (myfile.state === 'PROCESSING') {
+          // 타임아웃 확인
+          if (Date.now() - startTime > maxWaitTime) {
+            throw new Error('파일 처리 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+          }
+          await new Promise(r => setTimeout(r, 5000));
+        } else {
+          throw new Error(`알 수 없는 파일 상태: ${myfile.state}`);
+        }
+      } catch (error) {
+        if (error.message.includes('타임아웃') || error.message.includes('찾을 수 없습니다')) {
+          throw error;
+        }
+        console.log(`[동영상 상태 조회 오류] ${error.message}, 재시도 중...`);
+        await new Promise(r => setTimeout(r, 3000));
       }
-    // 4) 처리 완료 대기 (PROCESSING → ACTIVE)
-    const statusUrl = uploadResult.file?.uri + `?key=${env.GEMINI_API_KEY}`;
-    let statusResp = await fetch(statusUrl);
-    if (!statusResp.ok) {
-      throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
-    }
-    let myfile = await statusResp.json();
-    while (myfile.state === 'PROCESSING') {
-      console.log('비디오 처리 중...');
-      await new Promise(r => setTimeout(r, 5000));
-      statusResp = await fetch(statusUrl);
-      if (!statusResp.ok) {
-        throw new Error(`파일 상태 조회 실패: ${statusResp.status}`);
-      }
-      myfile = await statusResp.json();
-    }
-    if (myfile.state !== 'ACTIVE') {
-      throw new Error(`비디오 파일이 활성 상태가 아닙니다: ${myfile.state}`);
     }
 
-    // 5) 검열 요청
-    const fileUri = uploadResult.file.uri;
+    // 4) 검열 요청
     const requestBody = {
       contents: [{
         parts: [
@@ -727,7 +848,7 @@ async function handleVideoCensorship(file, env) {
               "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
               "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
              },
-          { file_data: { mime_type: file.type, file_uri: fileUri } }
+          { file_data: { mime_type: file.type, file_uri: videoFileUri } }
         ]
       }],
       generationConfig: { 
@@ -759,7 +880,7 @@ async function handleVideoCensorship(file, env) {
               "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
               "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
              },
-            { file_data: { mime_type: file.type, file_uri: fileUri } }
+            { file_data: { mime_type: file.type, file_uri: videoFileUri } }
           ]
         }],
         generationConfig: { 
