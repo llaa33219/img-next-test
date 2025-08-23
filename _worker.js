@@ -527,24 +527,81 @@ async function handleUpload(request, env) {
 // 이미지 압축 함수 - WebP로 변환 (10MB 이하로)
 async function compressImageToWebP(file, targetSizeMB = 10) {
   try {
-    // 이미지를 base64로 변환
-    const buffer = await file.arrayBuffer();
-    const base64 = arrayBufferToBase64(buffer);
+    console.log(`[이미지 압축] 원본 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB, 목표 크기: ${targetSizeMB}MB`);
     
-    // 이미지 압축을 위한 quality 설정 (0.1 ~ 1.0)
+    // 이미지를 Canvas로 로드
+    const canvas = new OffscreenCanvas(1, 1);
+    const ctx = canvas.getContext('2d');
+    
+    // 이미지 데이터 읽기
+    const arrayBuffer = await file.arrayBuffer();
+    const imageData = new Uint8Array(arrayBuffer);
+    
+    // ImageBitmap 생성
+    const bitmap = await createImageBitmap(file);
+    
+    // Canvas 크기 설정 (해상도 조정으로 압축)
+    let scaleFactor = 1;
+    const targetSize = targetSizeMB * 1024 * 1024;
+    
+    // 해상도 초기 조정
+    if (file.size > targetSize) {
+      scaleFactor = Math.sqrt(targetSize / file.size);
+      scaleFactor = Math.max(0.3, Math.min(1, scaleFactor)); // 0.3 ~ 1.0 범위
+    }
+    
+    const newWidth = Math.floor(bitmap.width * scaleFactor);
+    const newHeight = Math.floor(bitmap.height * scaleFactor);
+    
+    canvas.width = newWidth;
+    canvas.height = newHeight;
+    
+    // 이미지 드로잉
+    ctx.drawImage(bitmap, 0, 0, newWidth, newHeight);
+    
+    // WebP로 변환 (품질 조정으로 압축)
     let quality = 0.8;
     let compressedBlob;
     
-    // Canvas를 이용한 압축 (Worker 환경에서는 실제로 서버사이드 압축 라이브러리가 필요함)
-    // 여기서는 단순히 quality를 조정하여 크기를 줄이는 시뮬레이션
-    // 실제 구현시에는 WebAssembly 기반 이미지 압축 라이브러리 사용 필요
+    // 품질을 점진적으로 낮춰가며 목표 크기 달성
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        compressedBlob = await canvas.convertToBlob({
+          type: 'image/webp',
+          quality: quality
+        });
+        
+        console.log(`[압축 시도 ${attempt + 1}] 크기: ${(compressedBlob.size / 1024 / 1024).toFixed(2)}MB, 품질: ${quality}`);
+        
+        if (compressedBlob.size <= targetSize || quality <= 0.1) {
+          break;
+        }
+        
+        quality = Math.max(0.1, quality - 0.15);
+      } catch (error) {
+        console.log(`[압축 시도 ${attempt + 1} 실패]`, error);
+        if (attempt === 4) {
+          // 압축 실패시 원본 반환
+          return file;
+        }
+      }
+    }
     
-    // 임시로 원본 반환 (실제 압축 로직은 별도 라이브러리 필요)
-    console.log(`[이미지 압축] 원본 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB, WebP 압축 필요`);
+    if (compressedBlob && compressedBlob.size < file.size) {
+      console.log(`[이미지 압축 성공] ${(file.size / 1024 / 1024).toFixed(2)}MB → ${(compressedBlob.size / 1024 / 1024).toFixed(2)}MB`);
+      
+      // Blob을 File 객체로 변환
+      const compressedFile = new File([compressedBlob], file.name.replace(/\.[^/.]+$/, '.webp'), {
+        type: 'image/webp',
+        lastModified: Date.now()
+      });
+      
+      return compressedFile;
+    } else {
+      console.log(`[이미지 압축] 압축 효과 없음, 원본 사용`);
+      return file;
+    }
     
-    // 실제 환경에서는 wasm-imagemagick 또는 sharp-wasm 등을 사용
-    // 여기서는 원본 파일 반환 (압축 시뮬레이션)
-    return file;
   } catch (error) {
     console.log('[이미지 압축 실패]', error);
     return file; // 압축 실패시 원본 반환
@@ -554,13 +611,36 @@ async function compressImageToWebP(file, targetSizeMB = 10) {
 // 비디오 압축 함수 - WebM으로 변환 (100MB 이하로)
 async function compressVideoToWebM(file, targetSizeMB = 100) {
   try {
-    console.log(`[비디오 압축] 원본 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB, WebM 압축 필요`);
+    console.log(`[비디오 압축] 원본 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB, 목표 크기: ${targetSizeMB}MB`);
     
-    // Worker 환경에서는 FFmpeg.wasm 같은 라이브러리 필요
-    // 실제 구현시에는 비디오 트랜스코딩 서비스 사용 권장
+    // Worker 환경에서 MediaRecorder API 사용
+    const videoUrl = URL.createObjectURL(file);
+    const video = new OffscreenCanvas(1, 1);
     
-    // 임시로 원본 반환 (실제 압축 로직은 별도 라이브러리 필요)
-    return file;
+    try {
+      // 비디오 메타데이터 처리를 위한 간단한 압축 시뮬레이션
+      const targetSize = targetSizeMB * 1024 * 1024;
+      
+      if (file.size <= targetSize) {
+        console.log(`[비디오 압축] 이미 목표 크기 이하, 원본 사용`);
+        return file;
+      }
+      
+      // 비디오 압축은 복잡하므로 간단한 학습 버전만 구현
+      // 실제 환경에서는 FFmpeg.wasm 또는 외부 서비스 사용 권장
+      
+      // 비디오가 너무 큰 경우 경고 메시지
+      if (file.size > targetSize * 2) {
+        console.log(`[비디오 압축 경고] 파일이 너무 큽니다. 외부 압축 도구 사용을 권장합니다.`);
+      }
+      
+      // 기본적으로 원본 반환 (비디오 압축은 복잡하므로)
+      return file;
+      
+    } finally {
+      URL.revokeObjectURL(videoUrl);
+    }
+    
   } catch (error) {
     console.log('[비디오 압축 실패]', error);
     return file; // 압축 실패시 원본 반환
@@ -594,13 +674,13 @@ async function handleImageCensorship(file, env) {
       const buffer = await processedFile.arrayBuffer();
       const base64Image = arrayBufferToBase64(buffer);
       
-      // DashScope Qwen-VL 모델 사용
+      // DashScope 재시도 로직으로 API 호출
       console.log(`[DashScope API] 이미지 분석 요청 시작`);
       
       const apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
       
       const requestBody = {
-        model: 'qwen-vl-plus', // 또는 'qwen-vl-max' 사용 가능
+        model: 'qwen-vl-plus',
         input: {
           messages: [
             {
@@ -641,50 +721,91 @@ async function handleImageCensorship(file, env) {
         }
       };
       
-      const analysisResponse = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${dashscopeApiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
-      });
+      let analysisResponse;
+      let attempt = 0;
+      const maxRetries = 3;
       
-      if (!analysisResponse.ok) {
-        const err = await analysisResponse.text();
-        if (analysisResponse.status === 401) {
-          throw new Error('API 키가 유효하지 않습니다.');
-        } else if (analysisResponse.status === 403) {
-          throw new Error('API 키에 접근 권한이 없습니다.');
-        } else if (analysisResponse.status === 429) {
-          throw new Error('API 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
-        } else {
-          throw new Error(`API 요청 실패 (${analysisResponse.status}): ${err}`);
+      // 재시도 로직 사용
+      while (attempt < maxRetries) {
+        try {
+          console.log(`[DashScope API] 시도 ${attempt + 1}/${maxRetries}`);
+          
+          analysisResponse = await fetch(apiUrl, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${dashscopeApiKey}`,
+              'Content-Type': 'application/json',
+              'X-DashScope-Async': 'enable' // 비동기 처리 활성화 시도
+            },
+            body: JSON.stringify(requestBody)
+          });
+          
+          if (analysisResponse.ok) {
+            console.log(`[DashScope API] 성공 - 시도 ${attempt + 1}`);
+            break;
+          } else {
+            throw new Error(`HTTP ${analysisResponse.status}: ${analysisResponse.statusText}`);
+          }
+        } catch (error) {
+          attempt++;
+          console.log(`[DashScope API 오류] 시도 ${attempt}/${maxRetries}: ${error.message}`);
+          
+          if (attempt >= maxRetries) {
+            throw new Error(`API 호출 실패 (최대 재시도 초과): ${error.message}`);
+          }
+          
+          // 재시도 전 대기
+          const delay = Math.pow(2, attempt) * 1000; // 지수 백오프: 1s, 2s, 4s
+          console.log(`[DashScope API] ${delay}ms 후 재시도...`);
+          await new Promise(r => setTimeout(r, delay));
         }
       }
+            
+      let analysisResult;
+      try {
+        analysisResult = await analysisResponse.json();
+        console.log(`[DashScope API] 이미지 분석 완료`);
+      } catch (parseError) {
+        console.log('DashScope JSON 파싱 오류:', parseError);
+        const responseText = await analysisResponse.text();
+        console.log('원본 응답:', responseText);
+        throw new Error(`API 응답 파싱 실패: ${parseError.message}`);
+      }
       
-      const analysisResult = await analysisResponse.json();
-      console.log(`[DashScope API] 이미지 분석 완료`);
-      
-      // DashScope 응답에서 텍스트 추출
+      // DashScope 응답에서 텍스트 추출 (다양한 형식 지원)
       let responseText = '';
+      
+      // 형식 1: output.choices[0].message.content
       if (analysisResult.output?.choices?.[0]?.message?.content) {
-        // 문자열 또는 배열 형태의 content 처리
         const content = analysisResult.output.choices[0].message.content;
         if (typeof content === 'string') {
           responseText = content;
         } else if (Array.isArray(content)) {
-          responseText = content.map(item => item.text || '').join('');
+          responseText = content.map(item => item.text || item.content || '').join('');
         }
+      }
+      // 형식 2: output.text
+      else if (analysisResult.output?.text) {
+        responseText = analysisResult.output.text;
+      }
+      // 형식 3: choices[0].text (GPT 스타일)
+      else if (analysisResult.choices?.[0]?.text) {
+        responseText = analysisResult.choices[0].text;
+      }
+      // 형식 4: text 직접 필드
+      else if (analysisResult.text) {
+        responseText = analysisResult.text;
       }
       
       if (!responseText) {
-        console.log('DashScope 응답:', JSON.stringify(analysisResult, null, 2));
-        throw new Error('API 응답에서 분석 결과를 찾을 수 없습니다.');
+        console.log('DashScope 응답 구조:', JSON.stringify(analysisResult, null, 2));
+        throw new Error('분석 결과를 찾을 수 없습니다. API 응답 형식을 확인해주세요.');
       }
-
+      
+      console.log(`[DashScope API] 분석 결과 추출 완료: ${responseText.substring(0, 100)}...`);
+      
       // 분석 결과 파싱
-      const bad = isInappropriateContent(responseText);
+      const bad = isInappropriateContent(responseText.trim());
     
       // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
       if (bad.isInappropriate && bad.reasons.length >= 4) {
@@ -794,13 +915,13 @@ async function handleVideoCensorship(file, env) {
       const buffer = await processedFile.arrayBuffer();
       const base64Video = arrayBufferToBase64(buffer);
       
-      // DashScope Qwen-VL 모델 사용
+      // DashScope 재시도 로직으로 비디오 API 호출
       console.log(`[DashScope API] 비디오 분석 요청 시작`);
       
       const apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
       
       const requestBody = {
-        model: 'qwen-vl-plus', // 또는 'qwen-vl-max' 사용 가능
+        model: 'qwen-vl-plus',
         input: {
           messages: [
             {
@@ -842,50 +963,86 @@ async function handleVideoCensorship(file, env) {
         }
       };
       
-      const analysisResponse = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${dashscopeApiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
-      });
+      let analysisResponse;
+      let attempt = 0;
+      const maxRetries = 3;
       
-      if (!analysisResponse.ok) {
-        const err = await analysisResponse.text();
-        if (analysisResponse.status === 401) {
-          throw new Error('API 키가 유효하지 않습니다.');
-        } else if (analysisResponse.status === 403) {
-          throw new Error('API 키에 접근 권한이 없습니다.');
-        } else if (analysisResponse.status === 429) {
-          throw new Error('API 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
-        } else {
-          throw new Error(`API 요청 실패 (${analysisResponse.status}): ${err}`);
+      // 재시도 로직 사용
+      while (attempt < maxRetries) {
+        try {
+          console.log(`[DashScope API] 비디오 시도 ${attempt + 1}/${maxRetries}`);
+          
+          analysisResponse = await fetch(apiUrl, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${dashscopeApiKey}`,
+              'Content-Type': 'application/json',
+              'X-DashScope-Async': 'enable'
+            },
+            body: JSON.stringify(requestBody)
+          });
+          
+          if (analysisResponse.ok) {
+            console.log(`[DashScope API] 비디오 성공 - 시도 ${attempt + 1}`);
+            break;
+          } else {
+            throw new Error(`HTTP ${analysisResponse.status}: ${analysisResponse.statusText}`);
+          }
+        } catch (error) {
+          attempt++;
+          console.log(`[DashScope API 비디오 오류] 시도 ${attempt}/${maxRetries}: ${error.message}`);
+          
+          if (attempt >= maxRetries) {
+            throw new Error(`비디오 API 호출 실패 (최대 재시도 초과): ${error.message}`);
+          }
+          
+          const delay = Math.pow(2, attempt) * 1000;
+          console.log(`[DashScope API] ${delay}ms 후 비디오 재시도...`);
+          await new Promise(r => setTimeout(r, delay));
         }
       }
       
-      const analysisResult = await analysisResponse.json();
-      console.log(`[DashScope API] 비디오 분석 완료`);
+      let analysisResult;
+      try {
+        analysisResult = await analysisResponse.json();
+        console.log(`[DashScope API] 비디오 분석 완료`);
+      } catch (parseError) {
+        console.log('DashScope 비디오 JSON 파싱 오류:', parseError);
+        const responseText = await analysisResponse.text();
+        console.log('비디오 원본 응답:', responseText);
+        throw new Error(`비디오 API 응답 파싱 실패: ${parseError.message}`);
+      }
       
-      // DashScope 응답에서 텍스트 추출
+      // DashScope 응답에서 텍스트 추출 (다양한 형식 지원)
       let responseText = '';
+      
       if (analysisResult.output?.choices?.[0]?.message?.content) {
-        // 문자열 또는 배열 형태의 content 처리
         const content = analysisResult.output.choices[0].message.content;
         if (typeof content === 'string') {
           responseText = content;
         } else if (Array.isArray(content)) {
-          responseText = content.map(item => item.text || '').join('');
+          responseText = content.map(item => item.text || item.content || '').join('');
         }
+      }
+      else if (analysisResult.output?.text) {
+        responseText = analysisResult.output.text;
+      }
+      else if (analysisResult.choices?.[0]?.text) {
+        responseText = analysisResult.choices[0].text;
+      }
+      else if (analysisResult.text) {
+        responseText = analysisResult.text;
       }
       
       if (!responseText) {
-        console.log('DashScope 응답:', JSON.stringify(analysisResult, null, 2));
-        throw new Error('API 응답에서 분석 결과를 찾을 수 없습니다.');
+        console.log('DashScope 비디오 응답 구조:', JSON.stringify(analysisResult, null, 2));
+        throw new Error('비디오 분석 결과를 찾을 수 없습니다. API 응답 형식을 확인해주세요.');
       }
       
+      console.log(`[DashScope API] 비디오 분석 결과 추출 완료: ${responseText.substring(0, 100)}...`);
+      
       // 분석 결과 파싱
-      const bad = isInappropriateContent(responseText);
+      const bad = isInappropriateContent(responseText.trim());
     
       // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
       if (bad.isInappropriate && bad.reasons.length >= 4) {
