@@ -686,135 +686,68 @@ async function handleImageCensorship(file, env) {
       // DashScope 재시도 로직으로 API 호출
       console.log(`[DashScope API] 이미지 분석 요청 시작`);
       
+      const apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
+      
+    const requestBody = {
+        model: 'qwen-vl-plus',
+        input: {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  text: "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+            "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
+            "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+            "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+            "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+            "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+            "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+            "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+            "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
+            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+            "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+           },
+                {
+                  image: `data:${processedFile.type};base64,${base64Image}`
+                }
+              ]
+            }
+          ]
+        },
+        parameters: {
+        temperature: 0.05, 
+          top_k: 20,
+          top_p: 0.8,
+          max_tokens: 400
+        }
+      };
+      
       let analysisResponse;
       let attempt = 0;
       const maxRetries = 3;
       
       // 재시도 로직 사용
       while (attempt < maxRetries) {
-        // 여러 가지 엔드포인트와 요청 형식 시도
-        let apiUrl, requestBody;
-        
-        if (attempt === 0) {
-        // 시도 1: 멀티모달 생성 API (현재 방식)
-        apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
-        requestBody = {
-          model: 'qwen-vl-plus',
-          input: {
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  {
-                    text: "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
-                      "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
-                      "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-                      "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-                      "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-                      "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-                      "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-                      "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-                      "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-                      "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
-                      "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-                      "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-                      "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-                      "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-                      "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-                      "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-                      "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-                      "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-                  },
-                  {
-                    image: `data:${processedFile.type};base64,${base64Image}`
-                  }
-                ]
-              }
-            ]
-          },
-          parameters: {
-            temperature: 0.05,
-            top_k: 20,
-            top_p: 0.8,
-            max_tokens: 400
-          }
-        };
-      } else if (attempt === 1) {
-        // 시도 2: 텍스트 생성 API (간단한 테스트)
-        apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation';
-        requestBody = {
-          model: 'qwen-plus',
-          input: {
-            messages: [
-              {
-                role: 'user',
-                content: 'Hello, this is an API connectivity test. Please respond with "API test successful".'
-              }
-            ]
-          },
-          parameters: {
-            max_tokens: 50
-          }
-        };
-      } else {
-        // 시도 3: 다른 모델 이름 시도
-        apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
-        requestBody = {
-          model: 'qwen-vl-max', // 다른 모델 이름 시도
-          input: {
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  {
-                    text: "Simple test: Is this image appropriate? Answer with 'appropriate' or 'inappropriate'."
-                  },
-                  {
-                    image: `data:${processedFile.type};base64,${base64Image}`
-                  }
-                ]
-              }
-            ]
-          },
-          parameters: {
-            temperature: 0.1,
-            max_tokens: 50
-          }
-        };
-      }
-      
-        console.log(`[시도 ${attempt + 1}] 사용 중인 엔드포인트: ${apiUrl}`);
-        console.log(`[시도 ${attempt + 1}] 사용 중인 모델: ${requestBody.model}`);
         try {
           console.log(`[DashScope API] 시도 ${attempt + 1}/${maxRetries}`);
           console.log(`[DashScope API] 요청 URL: ${apiUrl}`);
-          
-          // 여러 가지 인증 방식 시도
-          const headers = {
-            'Content-Type': 'application/json'
-          };
-          
-          // 시도 1: Authorization Bearer 방식
-          if (attempt === 0) {
-            headers['Authorization'] = `Bearer ${dashscopeApiKey}`;
-            console.log(`[인증 방식] Authorization Bearer`);
-          }
-          // 시도 2: X-DashScope-API-Key 헤더 방식
-          else if (attempt === 1) {
-            headers['X-DashScope-API-Key'] = dashscopeApiKey;
-            console.log(`[인증 방식] X-DashScope-API-Key 헤더`);
-          }
-          // 시도 3: Authorization 단순 방식 
-          else {
-            headers['Authorization'] = dashscopeApiKey;
-            console.log(`[인증 방식] Authorization 직접`);
-          }
-          
-          console.log(`[요청 헤더]`, Object.keys(headers).join(', '));
+          console.log(`[DashScope API] 헤더 확인 - X-DashScope-API-Key: ${dashscopeApiKey.substring(0, 8)}...`);
           
           analysisResponse = await fetch(apiUrl, {
             method: 'POST',
-            headers: headers,
+            headers: {
+              'X-DashScope-API-Key': dashscopeApiKey,
+              'Content-Type': 'application/json',
+              'X-DashScope-Async': 'enable' // 비동기 처리 활성화 시도
+            },
             body: JSON.stringify(requestBody)
           });
           
@@ -836,18 +769,15 @@ async function handleImageCensorship(file, env) {
             console.log(`[DashScope API 401 오류 디버깅]`);
             console.log(`- API 키 길이: ${dashscopeApiKey.length}`);
             console.log(`- API 키 형식: ${dashscopeApiKey.startsWith('sk-') ? 'OpenAI 스타일 (sk-)' : 'DashScope 표준 형식'}`);
-            console.log(`- 요청 헤더: ${JSON.stringify(headers)}`);
+            console.log(`- 요청 헤더: X-DashScope-API-Key: ${dashscopeApiKey.substring(0, 8)}...`);
             console.log(`- 엔드포인트: ${apiUrl}`);
-            console.log(`- 모델: ${requestBody.model}`);
             
             // 응답 본문도 확인
-            if (analysisResponse) {
-              try {
-                const errorResponse = await analysisResponse.text();
-                console.log(`- 오류 응답 본문:`, errorResponse);
-              } catch (e) {
-                console.log(`- 오류 응답 본문 읽기 실패:`, e.message);
-              }
+            try {
+              const errorResponse = await analysisResponse.text();
+              console.log(`- 오류 응답 본문:`, errorResponse);
+            } catch (e) {
+              console.log(`- 오류 응답 본문 읽기 실패:`, e.message);
             }
           }
           
@@ -1076,7 +1006,7 @@ async function handleVideoCensorship(file, env) {
           analysisResponse = await fetch(apiUrl, {
           method: 'POST',
           headers: {
-              'Authorization': `Bearer ${dashscopeApiKey}`,
+              'X-DashScope-API-Key': dashscopeApiKey,
               'Content-Type': 'application/json',
               'X-DashScope-Async': 'enable'
             },
