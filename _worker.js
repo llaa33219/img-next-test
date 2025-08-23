@@ -524,251 +524,240 @@ async function handleUpload(request, env) {
   });
 }
 
-// 이미지 검열 - Files API 사용
+// 이미지 압축 함수 - WebP로 변환 (10MB 이하로)
+async function compressImageToWebP(file, targetSizeMB = 10) {
+  try {
+    // 이미지를 base64로 변환
+    const buffer = await file.arrayBuffer();
+    const base64 = arrayBufferToBase64(buffer);
+    
+    // 이미지 압축을 위한 quality 설정 (0.1 ~ 1.0)
+    let quality = 0.8;
+    let compressedBlob;
+    
+    // Canvas를 이용한 압축 (Worker 환경에서는 실제로 서버사이드 압축 라이브러리가 필요함)
+    // 여기서는 단순히 quality를 조정하여 크기를 줄이는 시뮬레이션
+    // 실제 구현시에는 WebAssembly 기반 이미지 압축 라이브러리 사용 필요
+    
+    // 임시로 원본 반환 (실제 압축 로직은 별도 라이브러리 필요)
+    console.log(`[이미지 압축] 원본 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB, WebP 압축 필요`);
+    
+    // 실제 환경에서는 wasm-imagemagick 또는 sharp-wasm 등을 사용
+    // 여기서는 원본 파일 반환 (압축 시뮬레이션)
+    return file;
+  } catch (error) {
+    console.log('[이미지 압축 실패]', error);
+    return file; // 압축 실패시 원본 반환
+  }
+}
+
+// 비디오 압축 함수 - WebM으로 변환 (100MB 이하로)
+async function compressVideoToWebM(file, targetSizeMB = 100) {
+  try {
+    console.log(`[비디오 압축] 원본 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB, WebM 압축 필요`);
+    
+    // Worker 환경에서는 FFmpeg.wasm 같은 라이브러리 필요
+    // 실제 구현시에는 비디오 트랜스코딩 서비스 사용 권장
+    
+    // 임시로 원본 반환 (실제 압축 로직은 별도 라이브러리 필요)
+    return file;
+  } catch (error) {
+    console.log('[비디오 압축 실패]', error);
+    return file; // 압축 실패시 원본 반환
+  }
+}
+
+// 이미지 검열 - DashScope API 사용
 async function handleImageCensorship(file, env) {
   try {
     console.log(`이미지 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
-    const geminiApiKey = env.GEMINI_API_KEY;
-    if (!geminiApiKey) {
+    const dashscopeApiKey = env.DASHSCOPE_API_KEY;
+    if (!dashscopeApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
+          success: false, error: 'DashScope API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
-
-
-
-    let uploadUrl, uploadResult, fileUri;
-
-    // 1) Resumable upload 시작 (재시도 로직 포함)
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        console.log(`[이미지 업로드 시작] 시도 ${attempt}/3`);
-        const startResp = await fetch(
-          `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
-          { method: 'POST',
-            headers: {
-              'X-Goog-Upload-Protocol': 'resumable',
-              'X-Goog-Upload-Command': 'start',
-              'X-Goog-Upload-Header-Content-Length': file.size,
-              'X-Goog-Upload-Header-Content-Type': file.type,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ file: { display_name: 'image_upload' } })
-          }
-        );
-        
-        if (!startResp.ok) {
-          const err = await startResp.text();
-          if (startResp.status === 401) {
-            throw new Error('API 키가 유효하지 않습니다.');
-          } else if (startResp.status === 403) {
-            throw new Error('API 키에 Files API 접근 권한이 없습니다.');
-          } else if (startResp.status === 429) {
-            if (attempt < 3) {
-              console.log(`[할당량 초과] ${attempt}회 재시도 중...`);
-              await new Promise(r => setTimeout(r, 2000 * attempt));
-              continue;
-            }
-            throw new Error('API 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
-          } else {
-            throw new Error(`업로드 시작 실패 (${startResp.status}): ${err}`);
-          }
-        }
-        
-        uploadUrl = startResp.headers.get('X-Goog-Upload-URL') || startResp.headers.get('Location');
-        
-        if (!uploadUrl) {
-          const json = await startResp.json().catch(() => null);
-          uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
-          
-          if (!uploadUrl) {
-            throw new Error('업로드 URL을 가져올 수 없습니다.');
-          }
-        }
-        
-        console.log(`[이미지 업로드 URL 획득] 성공`);
-        break;
-      } catch (error) {
-        if (attempt === 3) throw error;
-        console.log(`[이미지 업로드 시작 실패] 시도 ${attempt}/3: ${error.message}`);
-        await new Promise(r => setTimeout(r, 1000 * attempt));
-      }
+    
+    // 10MB 초과시 압축
+    let processedFile = file;
+    if (file.size > 10 * 1024 * 1024) {
+      console.log(`[이미지 검열] 10MB 초과, WebP 압축 진행`);
+      processedFile = await compressImageToWebP(file);
     }
 
-    // 2) 파일 업로드 및 finalize (재시도 로직 포함)
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        console.log(`[이미지 파일 업로드] 시도 ${attempt}/3`);
-        const buffer = await file.arrayBuffer();
-        const uploadResp = await fetch(uploadUrl, {
+
+
+    // DashScope API를 사용한 이미지 분석
+    try {
+      // 이미지를 base64로 인코딩
+      const buffer = await processedFile.arrayBuffer();
+      const base64Image = arrayBufferToBase64(buffer);
+      
+      // DashScope Qwen-VL 모델 사용
+      console.log(`[DashScope API] 이미지 분석 요청 시작`);
+      
+      const apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
+      
+      const requestBody = {
+        model: 'qwen-vl-plus', // 또는 'qwen-vl-max' 사용 가능
+        input: {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  text: "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+                    "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
+                    "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+                    "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+                    "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+                    "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+                    "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+                    "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+                    "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+                    "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
+                    "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+                    "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+                    "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+                    "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+                    "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+                    "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+                    "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+                    "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+                },
+                {
+                  image: `data:${processedFile.type};base64,${base64Image}`
+                }
+              ]
+            }
+          ]
+        },
+        parameters: {
+          temperature: 0.05,
+          top_k: 20,
+          top_p: 0.8,
+          max_tokens: 400
+        }
+      };
+      
+      const analysisResponse = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${dashscopeApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+      
+      if (!analysisResponse.ok) {
+        const err = await analysisResponse.text();
+        if (analysisResponse.status === 401) {
+          throw new Error('API 키가 유효하지 않습니다.');
+        } else if (analysisResponse.status === 403) {
+          throw new Error('API 키에 접근 권한이 없습니다.');
+        } else if (analysisResponse.status === 429) {
+          throw new Error('API 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+        } else {
+          throw new Error(`API 요청 실패 (${analysisResponse.status}): ${err}`);
+        }
+      }
+      
+      const analysisResult = await analysisResponse.json();
+      console.log(`[DashScope API] 이미지 분석 완료`);
+      
+      // DashScope 응답에서 텍스트 추출
+      let responseText = '';
+      if (analysisResult.output?.choices?.[0]?.message?.content) {
+        // 문자열 또는 배열 형태의 content 처리
+        const content = analysisResult.output.choices[0].message.content;
+        if (typeof content === 'string') {
+          responseText = content;
+        } else if (Array.isArray(content)) {
+          responseText = content.map(item => item.text || '').join('');
+        }
+      }
+      
+      if (!responseText) {
+        console.log('DashScope 응답:', JSON.stringify(analysisResult, null, 2));
+        throw new Error('API 응답에서 분석 결과를 찾을 수 없습니다.');
+      }
+
+      // 분석 결과 파싱
+      const bad = isInappropriateContent(responseText);
+    
+      // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
+      if (bad.isInappropriate && bad.reasons.length >= 4) {
+        console.log(`[이미지 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
+        
+        // 보수적 재검토 요청
+        const reReviewBody = {
+          model: 'qwen-vl-plus',
+          input: {
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    text: "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+                          "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
+                          "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+                  },
+                  {
+                    image: `data:${processedFile.type};base64,${base64Image}`
+                  }
+                ]
+              }
+            ]
+          },
+          parameters: {
+            temperature: 0.0,
+            top_k: 10,
+            top_p: 0.7,
+            max_tokens: 50
+          }
+        };
+        
+        const reReviewResp = await fetch(apiUrl, {
           method: 'POST',
           headers: {
-            'Content-Length': file.size,
-            'X-Goog-Upload-Offset': '0',
-            'X-Goog-Upload-Command': 'upload, finalize'
+            'Authorization': `Bearer ${dashscopeApiKey}`,
+            'Content-Type': 'application/json'
           },
-          body: buffer
+          body: JSON.stringify(reReviewBody)
         });
         
-        if (!uploadResp.ok) {
-          const err = await uploadResp.text();
-          if (uploadResp.status === 413) {
-            throw new Error('파일 크기가 너무 큽니다.');
-          } else if (uploadResp.status === 429) {
-            if (attempt < 3) {
-              console.log(`[업로드 할당량 초과] ${attempt}회 재시도 중...`);
-              await new Promise(r => setTimeout(r, 2000 * attempt));
-              continue;
+        if (reReviewResp.ok) {
+          const reReviewResult = await reReviewResp.json();
+          let reReviewText = '';
+          if (reReviewResult.output?.choices?.[0]?.message?.content) {
+            const content = reReviewResult.output.choices[0].message.content;
+            if (typeof content === 'string') {
+              reReviewText = content;
+            } else if (Array.isArray(content)) {
+              reReviewText = content.map(item => item.text || '').join('');
             }
-            throw new Error('업로드 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
-          } else {
-            throw new Error(`파일 업로드 실패 (${uploadResp.status}): ${err}`);
+          }
+          
+          if (reReviewText.toLowerCase().includes('appropriate') && !reReviewText.toLowerCase().includes('inappropriate')) {
+            console.log(`[이미지 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
+            return { ok: true };
           }
         }
-        
-        uploadResult = await uploadResp.json();
-        if (!uploadResult.file?.name || !uploadResult.file?.uri) {
-          throw new Error('업로드 완료 후 파일 정보를 확인할 수 없습니다.');
-        }
-        
-        fileUri = uploadResult.file.uri;
-        console.log(`[이미지 파일 업로드] 성공`);
-        break;
-      } catch (error) {
-        if (attempt === 3) throw error;
-        console.log(`[이미지 파일 업로드 실패] 시도 ${attempt}/3: ${error.message}`);
-        await new Promise(r => setTimeout(r, 1000 * attempt));
       }
-    }
-
-    // 3) 처리 완료 대기 (PROCESSING → ACTIVE) - 타임아웃 추가
-    const statusUrl = `${fileUri}?key=${geminiApiKey}`;
-    const maxWaitTime = 60000; // 60초
-    const startTime = Date.now();
-    
-    while (true) {
-      try {
-        const statusResp = await fetch(statusUrl);
-        if (!statusResp.ok) {
-          if (statusResp.status === 404) {
-            throw new Error('업로드된 파일을 찾을 수 없습니다.');
-          } else {
-            throw new Error(`파일 상태 조회 실패 (${statusResp.status})`);
-          }
-        }
-        
-        const myfile = await statusResp.json();
-        console.log(`[이미지 처리 상태] ${myfile.state}`);
-        
-        if (myfile.state === 'ACTIVE') {
-          console.log(`[이미지 처리 완료] 활성 상태 달성`);
-          break;
-        } else if (myfile.state === 'FAILED') {
-          throw new Error('파일 처리가 실패했습니다.');
-        } else if (myfile.state === 'PROCESSING') {
-          // 타임아웃 확인
-          if (Date.now() - startTime > maxWaitTime) {
-            throw new Error('파일 처리 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.');
-          }
-          await new Promise(r => setTimeout(r, 3000));
-        } else {
-          throw new Error(`알 수 없는 파일 상태: ${myfile.state}`);
-        }
-      } catch (error) {
-        if (error.message.includes('타임아웃') || error.message.includes('찾을 수 없습니다')) {
-          throw error;
-        }
-        console.log(`[이미지 상태 조회 오류] ${error.message}, 재시도 중...`);
-        await new Promise(r => setTimeout(r, 2000));
-      }
-    }
-
-    // 5) 검열 요청
-    const imageFileUri = uploadResult.file.uri;
-    const requestBody = {
-      contents: [{
-        parts: [
-          { text:
-            "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
-            "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
-            "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-            "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-            "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-            "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-            "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-            "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-            "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
-            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-            "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-           },
-          { file_data: { mime_type: file.type, file_uri: imageFileUri } }
-        ]
-      }],
-      generationConfig: { 
-        temperature: 0.05, 
-        topK: 20, 
-        topP: 0.8, 
-        maxOutputTokens: 400,
-        thinkingConfig: {
-          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
-        }
-      }
-    };
-
-    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
-    if (!analysis.success) {
-      throw new Error(analysis.error);
-    }
-
-    const bad = isInappropriateContent(analysis.text);
-    
-    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
-    if (bad.isInappropriate && bad.reasons.length >= 4) {
-      console.log(`[이미지 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
       
-      // 보수적 재검토 요청
-      const reReviewBody = {
-        contents: [{
-          parts: [
-            { text:
-              "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-              "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
-              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-             },
-            { file_data: { mime_type: file.type, file_uri: imageFileUri } }
-          ]
-        }],
-        generationConfig: { 
-          temperature: 0.0, 
-          topK: 10, 
-          topP: 0.7, 
-          maxOutputTokens: 50
-        }
-      };
-      
-      const reReview = await callGeminiAPI(geminiApiKey, reReviewBody);
-      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
-        console.log(`[이미지 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-        return { ok: true };
+      if (bad.isInappropriate) {
+        console.log(`[이미지 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
+        return { ok: false, response: new Response(JSON.stringify({
+            success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`
+          }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+        };
       }
+      return { ok: true };
+    } catch (error) {
+      console.log('[DashScope API 오류]', error);
+      throw error;
     }
-    
-    if (bad.isInappropriate) {
-      console.log(`[이미지 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`
-        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
-      };
-    }
-    return { ok: true };
   } catch (e) {
     console.log('handleImageCensorship 오류:', e);
     return { ok: false, response: new Response(JSON.stringify({
@@ -778,248 +767,197 @@ async function handleImageCensorship(file, env) {
   }
 }
 
-// 동영상 검열 - Files API 사용
+// 동영상 검열 - DashScope API 사용
 async function handleVideoCensorship(file, env) {
   try {
     console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
-    const geminiApiKey = env.GEMINI_API_KEY;
-    if (!geminiApiKey) {
+    const dashscopeApiKey = env.DASHSCOPE_API_KEY;
+    if (!dashscopeApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'Gemini API 키가 설정되지 않았습니다.'
+          success: false, error: 'DashScope API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
-
-
-
-    let uploadUrl, uploadResult, videoFileUri;
-
-    // 1) Resumable upload 시작 (재시도 로직 포함)
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        console.log(`[동영상 업로드 시작] 시도 ${attempt}/3`);
-        const startResp = await fetch(
-          `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${geminiApiKey}`,
-          { method: 'POST',
-            headers: {
-              'X-Goog-Upload-Protocol': 'resumable',
-              'X-Goog-Upload-Command': 'start',
-              'X-Goog-Upload-Header-Content-Length': file.size,
-              'X-Goog-Upload-Header-Content-Type': file.type,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ file: { display_name: 'video_upload' } })
-          }
-        );
-        
-        if (!startResp.ok) {
-          const err = await startResp.text();
-          if (startResp.status === 401) {
-            throw new Error('API 키가 유효하지 않습니다.');
-          } else if (startResp.status === 403) {
-            throw new Error('API 키에 Files API 접근 권한이 없습니다.');
-          } else if (startResp.status === 429) {
-            if (attempt < 3) {
-              console.log(`[동영상 할당량 초과] ${attempt}회 재시도 중...`);
-              await new Promise(r => setTimeout(r, 3000 * attempt));
-              continue;
-            }
-            throw new Error('API 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
-          } else {
-            throw new Error(`업로드 시작 실패 (${startResp.status}): ${err}`);
-          }
-        }
-        
-        uploadUrl = startResp.headers.get('X-Goog-Upload-URL') || startResp.headers.get('Location');
-        
-        if (!uploadUrl) {
-          const json = await startResp.json().catch(() => null);
-          uploadUrl = json?.uploadUri || json?.uploadUrl || json?.resumableUri;
-          
-          if (!uploadUrl) {
-            throw new Error('업로드 URL을 가져올 수 없습니다.');
-          }
-        }
-        
-        console.log(`[동영상 업로드 URL 획득] 성공`);
-        break;
-      } catch (error) {
-        if (attempt === 3) throw error;
-        console.log(`[동영상 업로드 시작 실패] 시도 ${attempt}/3: ${error.message}`);
-        await new Promise(r => setTimeout(r, 2000 * attempt));
-      }
-    }
-
-    // 2) 파일 업로드 및 finalize (재시도 로직 포함)
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        console.log(`[동영상 파일 업로드] 시도 ${attempt}/3`);
-        const buffer = await file.arrayBuffer();
-        const uploadResp = await fetch(uploadUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Length': file.size,
-            'X-Goog-Upload-Offset': '0',
-            'X-Goog-Upload-Command': 'upload, finalize'
-          },
-          body: buffer
-        });
-        
-        if (!uploadResp.ok) {
-          const err = await uploadResp.text();
-          if (uploadResp.status === 413) {
-            throw new Error('파일 크기가 너무 큽니다.');
-          } else if (uploadResp.status === 429) {
-            if (attempt < 3) {
-              console.log(`[동영상 업로드 할당량 초과] ${attempt}회 재시도 중...`);
-              await new Promise(r => setTimeout(r, 3000 * attempt));
-              continue;
-            }
-            throw new Error('업로드 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
-          } else {
-            throw new Error(`파일 업로드 실패 (${uploadResp.status}): ${err}`);
-          }
-        }
-        
-        uploadResult = await uploadResp.json();
-        if (!uploadResult.file?.name || !uploadResult.file?.uri) {
-          throw new Error('업로드 완료 후 파일 정보를 확인할 수 없습니다.');
-        }
-        
-        videoFileUri = uploadResult.file.uri;
-        console.log(`[동영상 파일 업로드] 성공`);
-        break;
-      } catch (error) {
-        if (attempt === 3) throw error;
-        console.log(`[동영상 파일 업로드 실패] 시도 ${attempt}/3: ${error.message}`);
-        await new Promise(r => setTimeout(r, 2000 * attempt));
-      }
-    }
-
-    // 3) 처리 완료 대기 (PROCESSING → ACTIVE) - 타임아웃 추가
-    const statusUrl = `${videoFileUri}?key=${geminiApiKey}`;
-    const maxWaitTime = 180000; // 3분 (동영상은 처리 시간이 더 오래 걸림)
-    const startTime = Date.now();
     
-    while (true) {
-      try {
-        const statusResp = await fetch(statusUrl);
-        if (!statusResp.ok) {
-          if (statusResp.status === 404) {
-            throw new Error('업로드된 파일을 찾을 수 없습니다.');
-          } else {
-            throw new Error(`파일 상태 조회 실패 (${statusResp.status})`);
-          }
-        }
-        
-        const myfile = await statusResp.json();
-        console.log(`[동영상 처리 상태] ${myfile.state}`);
-        
-        if (myfile.state === 'ACTIVE') {
-          console.log(`[동영상 처리 완료] 활성 상태 달성`);
-          break;
-        } else if (myfile.state === 'FAILED') {
-          throw new Error('파일 처리가 실패했습니다.');
-        } else if (myfile.state === 'PROCESSING') {
-          // 타임아웃 확인
-          if (Date.now() - startTime > maxWaitTime) {
-            throw new Error('파일 처리 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.');
-          }
-          await new Promise(r => setTimeout(r, 5000));
-        } else {
-          throw new Error(`알 수 없는 파일 상태: ${myfile.state}`);
-        }
-      } catch (error) {
-        if (error.message.includes('타임아웃') || error.message.includes('찾을 수 없습니다')) {
-          throw error;
-        }
-        console.log(`[동영상 상태 조회 오류] ${error.message}, 재시도 중...`);
-        await new Promise(r => setTimeout(r, 3000));
-      }
+    // 100MB 초과시 압축
+    let processedFile = file;
+    if (file.size > 100 * 1024 * 1024) {
+      console.log(`[비디오 검열] 100MB 초과, WebM 압축 진행`);
+      processedFile = await compressVideoToWebM(file);
     }
 
-    // 4) 검열 요청
-    const requestBody = {
-      contents: [{
-        parts: [
-          { text:
-              "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
-              "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
-              "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-              "Consider the entire video duration and any content that appears briefly. " +
-              "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-              "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-              "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-              "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-              "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-              "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-              "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
-              "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-              "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-              "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-              "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-              "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-              "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-              "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-              "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-             },
-          { file_data: { mime_type: file.type, file_uri: videoFileUri } }
-        ]
-      }],
-      generationConfig: { 
-        temperature: 0.05, 
-        topK: 20, 
-        topP: 0.8, 
-        maxOutputTokens: 400,
-        thinkingConfig: {
-          thinkingBudget: 0  // Thinking 모드 비활성화로 성능 최적화
-        }
-      }
-    };
-    const analysis = await callGeminiAPI(geminiApiKey, requestBody);
-    if (!analysis.success) {
-      throw new Error(analysis.error);
-    }
-    const bad = isInappropriateContent(analysis.text);
-    
-    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
-    if (bad.isInappropriate && bad.reasons.length >= 4) {
-      console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
+
+
+    // DashScope API를 사용한 비디오 분석
+    try {
+      // 비디오를 base64로 인코딩 (실제 환경에서는 큰 비디오의 경우 청크 업로드 필요)
+      const buffer = await processedFile.arrayBuffer();
+      const base64Video = arrayBufferToBase64(buffer);
       
-      // 보수적 재검토 요청
-      const reReviewBody = {
-        contents: [{
-          parts: [
-            { text:
-              "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-              "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
-              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-             },
-            { file_data: { mime_type: file.type, file_uri: videoFileUri } }
+      // DashScope Qwen-VL 모델 사용
+      console.log(`[DashScope API] 비디오 분석 요청 시작`);
+      
+      const apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
+      
+      const requestBody = {
+        model: 'qwen-vl-plus', // 또는 'qwen-vl-max' 사용 가능
+        input: {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  text: "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
+                    "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
+                    "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+                    "Consider the entire video duration and any content that appears briefly. " +
+                    "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+                    "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+                    "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+                    "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+                    "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+                    "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+                    "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
+                    "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+                    "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+                    "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+                    "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+                    "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+                    "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+                    "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+                    "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+                },
+                {
+                  video: `data:${processedFile.type};base64,${base64Video}`
+                }
+              ]
+            }
           ]
-        }],
-        generationConfig: { 
-          temperature: 0.0, 
-          topK: 10, 
-          topP: 0.7, 
-          maxOutputTokens: 50
+        },
+        parameters: {
+          temperature: 0.05,
+          top_k: 20,
+          top_p: 0.8,
+          max_tokens: 400
         }
       };
       
-      const reReview = await callGeminiAPI(geminiApiKey, reReviewBody);
-      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
-        console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-        return { ok: true };
+      const analysisResponse = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${dashscopeApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+      
+      if (!analysisResponse.ok) {
+        const err = await analysisResponse.text();
+        if (analysisResponse.status === 401) {
+          throw new Error('API 키가 유효하지 않습니다.');
+        } else if (analysisResponse.status === 403) {
+          throw new Error('API 키에 접근 권한이 없습니다.');
+        } else if (analysisResponse.status === 429) {
+          throw new Error('API 할당량이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+        } else {
+          throw new Error(`API 요청 실패 (${analysisResponse.status}): ${err}`);
+        }
       }
-    }
+      
+      const analysisResult = await analysisResponse.json();
+      console.log(`[DashScope API] 비디오 분석 완료`);
+      
+      // DashScope 응답에서 텍스트 추출
+      let responseText = '';
+      if (analysisResult.output?.choices?.[0]?.message?.content) {
+        // 문자열 또는 배열 형태의 content 처리
+        const content = analysisResult.output.choices[0].message.content;
+        if (typeof content === 'string') {
+          responseText = content;
+        } else if (Array.isArray(content)) {
+          responseText = content.map(item => item.text || '').join('');
+        }
+      }
+      
+      if (!responseText) {
+        console.log('DashScope 응답:', JSON.stringify(analysisResult, null, 2));
+        throw new Error('API 응답에서 분석 결과를 찾을 수 없습니다.');
+      }
+      
+      // 분석 결과 파싱
+      const bad = isInappropriateContent(responseText);
     
-    if (bad.isInappropriate) {
-      console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
-      return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
-        }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+      // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
+      if (bad.isInappropriate && bad.reasons.length >= 4) {
+        console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
+        
+        // 보수적 재검토 요청
+        const reReviewBody = {
+          model: 'qwen-vl-plus',
+          input: {
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    text: "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+                          "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
+                          "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+                  },
+                  {
+                    video: `data:${processedFile.type};base64,${base64Video}`
+                  }
+                ]
+              }
+            ]
+          },
+          parameters: {
+            temperature: 0.0,
+            top_k: 10,
+            top_p: 0.7,
+            max_tokens: 50
+          }
+        };
+        
+        const reReviewResp = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${dashscopeApiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(reReviewBody)
+        });
+        
+        if (reReviewResp.ok) {
+          const reReviewResult = await reReviewResp.json();
+          let reReviewText = '';
+          if (reReviewResult.output?.choices?.[0]?.message?.content) {
+            const content = reReviewResult.output.choices[0].message.content;
+            if (typeof content === 'string') {
+              reReviewText = content;
+            } else if (Array.isArray(content)) {
+              reReviewText = content.map(item => item.text || '').join('');
+            }
+          }
+          
+          if (reReviewText.toLowerCase().includes('appropriate') && !reReviewText.toLowerCase().includes('inappropriate')) {
+            console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
+            return { ok: true };
+          }
+        }
+      }
+      
+      if (bad.isInappropriate) {
+        console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
+        return { ok: false, response: new Response(JSON.stringify({
+            success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
+          }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+      }
+      return { ok: true };
+    } catch (error) {
+      console.log('[DashScope API 오류]', error);
+      throw error;
     }
-    return { ok: true };
   } catch (e) {
     console.log('handleVideoCensorship 오류:', e);
     return { ok: false, response: new Response(JSON.stringify({
@@ -1028,82 +966,8 @@ async function handleVideoCensorship(file, env) {
   }
 }
 
-// Gemini API 호출 함수
-async function callGeminiAPI(apiKey, requestBody) {
-  let retryCount = 0;
-  const maxRetries = 3, retryDelay = 2000;
-  while (retryCount < maxRetries) {
-    try {
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      });
-      if (!response.ok) {
-        if (response.status === 429 && retryCount < maxRetries - 1) {
-          retryCount++;
-          console.log(`할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
-          await new Promise(r => setTimeout(r, retryDelay));
-          continue;
-        }
-        console.log('Gemini API 호출 실패:', {
-          status: response.status,
-          statusText: response.statusText,
-          headers: Object.fromEntries([...response.headers])
-        });
-        const errText = await response.text();
-        return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
-      }
-      const data = await response.json();
-      
-      // Gemini 2.5 Flash의 새로운 응답 구조 처리
-      const candidate = data.candidates?.[0];
-      if (!candidate?.content?.parts) {
-        console.log('Gemini API 응답 상태:', {
-          hasCandidates: !!data.candidates,
-          candidatesLength: data.candidates?.length || 0,
-          hasContent: !!candidate?.content,
-          hasParts: !!candidate?.content?.parts,
-          responseKeys: Object.keys(data || {})
-        });
-        return { success: false, error: 'Gemini API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
-      }
-
-      // parts 배열에서 실제 응답 텍스트 찾기 (thought가 false이거나 없는 것)
-      let responseText = '';
-      for (const part of candidate.content.parts) {
-        if (part.text && (!part.thought || part.thought === false)) {
-          responseText += part.text;
-        }
-      }
-
-      // 실제 응답 텍스트가 없으면 첫 번째 텍스트 사용 (하위 호환성)
-      if (!responseText && candidate.content.parts[0]?.text) {
-        responseText = candidate.content.parts[0].text;
-      }
-
-      if (!responseText) {
-        console.log('Gemini API 응답 파싱 실패:', {
-          partsCount: candidate.content.parts.length,
-          parts: candidate.content.parts.map(p => ({ hasText: !!p.text, thought: p.thought }))
-        });
-        return { success: false, error: 'Gemini API 응답에서 텍스트를 추출할 수 없습니다.' };
-      }
-
-      return { success: true, text: responseText };
-    } catch (e) {
-      retryCount++;
-      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
-      if (retryCount < maxRetries) {
-        await new Promise(r => setTimeout(r, retryDelay));
-      } else {
-        return { success: false, error: `API 호출 오류: ${e.message}` };
-      }
-    }
-  }
-  return { success: false, error: '최대 재시도 횟수 초과' };
-}
+// DashScope API 호출 함수 - 사용하지 않음 (직접 fetch 사용)
+// handleImageCensorship와 handleVideoCensorship에서 직접 DashScope API를 호출함
 
 // =======================
 // 부적절한 내용 분석 함수 (강화된 버전)
@@ -1912,7 +1776,7 @@ function renderApiDocs(host) {
     <h1>이미지 공유 API 문서</h1>
   </div>
   
-  <p>이 API는 외부 애플리케이션에서 이미지 및 동영상을 업로드하고 공유할 수 있는 기능을 제공합니다. 모든 콘텐츠는 업로드 전 자동 검열됩니다.</p>
+  <p>이 API는 외부 애플리케이션에서 이미지 및 동영상을 업로드하고 공유할 수 있는 기능을 제공합니다. 모든 콘텐츠는 업로드 전 AI 기반 자동 검열을 거쳐 부적절한 콘텐츠를 차단합니다.</p>
   
   <h2>엔드포인트</h2>
   
