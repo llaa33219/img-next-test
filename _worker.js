@@ -343,6 +343,7 @@ async function handleUpload(request, env) {
   console.log(`[검열 시작] ${files.length}개 파일 검열 시작`);
   const validFiles = [];
   const failedFiles = [];
+  const aiResponses = []; // AI 응답 저장
   
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -376,12 +377,21 @@ async function handleUpload(request, env) {
         if (files.length === 1) {
           return new Response(JSON.stringify({
             success: false,
-            error: `파일 검열 실패: ${errorMessage}`
+            error: `파일 검열 실패: ${errorMessage}`,
+            aiResponse: r.aiResponse || null // AI 응답 포함
           }), { status: 400, headers: { 'Content-Type': 'application/json' } });
         }
       } else {
         console.log(`[검열 통과] ${i + 1}번째 파일 검열 통과`);
         validFiles.push({ file, index: i + 1 });
+        // AI 응답 저장
+        if (r.aiResponse) {
+          aiResponses.push({
+            index: i + 1,
+            fileName: file.name || 'Unknown',
+            aiResponse: r.aiResponse
+          });
+        }
       }
     } catch (e) {
       console.log(`[검열 오류] ${i + 1}번째 파일 검열 중 오류:`, e);
@@ -510,7 +520,8 @@ async function handleUpload(request, env) {
     uploadedFiles: uploadSuccessFiles,
     totalFiles: files.length,
     successCount: uploadSuccessFiles.length,
-    failureCount: allFailedFiles.length
+    failureCount: allFailedFiles.length,
+    aiResponses: aiResponses // AI 검열 응답 포함
   };
   
   // 실패한 파일이 있으면 추가 정보 포함
@@ -527,7 +538,7 @@ async function handleUpload(request, env) {
 // 이미지 검열 - base64 인코딩 사용
 async function handleImageCensorship(file, env) {
   try {
-    console.log(`[이미지 검열 시작] 파일명: ${file.name || 'Unknown'}, 타입: ${file.type}, 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
+    console.log(`이미지 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     const dashscopeApiKey = env.DASHSCOPE_API_KEY;
     if (!dashscopeApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
@@ -591,10 +602,7 @@ async function handleImageCensorship(file, env) {
     }
 
     const bad = isInappropriateContent(analysis.text);
-    console.log('[이미지 검열 결과]', {
-      inappropriate: bad.isInappropriate,
-      reasons: bad.reasons
-    });
+    const aiResponse = analysis.text; // AI 응답 저장
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
     if (bad.isInappropriate && bad.reasons.length >= 4) {
@@ -628,24 +636,23 @@ async function handleImageCensorship(file, env) {
       };
       
       const reReview = await callQwenAPI(dashscopeApiKey, reReviewBody);
-      console.log('[이미지 재검토 AI 응답]:', reReview.text);
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[이미지 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-        return { ok: true };
+        return { ok: true, aiResponse: aiResponse + '\n[재검토]: ' + reReview.text };
       }
     }
     
     if (bad.isInappropriate) {
       console.log(`[이미지 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
-      return { ok: false, response: new Response(JSON.stringify({
+      return { ok: false, aiResponse: aiResponse, response: new Response(JSON.stringify({
           success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`
         }), { status: 400, headers: { 'Content-Type': 'application/json' } })
       };
     }
-    return { ok: true };
+    return { ok: true, aiResponse: aiResponse };
   } catch (e) {
     console.log('handleImageCensorship 오류:', e);
-    return { ok: false, response: new Response(JSON.stringify({
+    return { ok: false, aiResponse: null, response: new Response(JSON.stringify({
         success: false, error: `이미지 검열 중 오류 발생: ${e.message}`
       }), { status: 500, headers: { 'Content-Type': 'application/json' } })
     };
@@ -655,7 +662,7 @@ async function handleImageCensorship(file, env) {
 // 동영상 검열 - base64 인코딩 사용
 async function handleVideoCensorship(file, env) {
   try {
-    console.log(`[비디오 검열 시작] 파일명: ${file.name || 'Unknown'}, 타입: ${file.type}, 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
+    console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     const dashscopeApiKey = env.DASHSCOPE_API_KEY;
     if (!dashscopeApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
@@ -720,10 +727,7 @@ async function handleVideoCensorship(file, env) {
       throw new Error(analysis.error);
     }
     const bad = isInappropriateContent(analysis.text);
-    console.log('[비디오 검열 결과]', {
-      inappropriate: bad.isInappropriate,
-      reasons: bad.reasons
-    });
+    const aiResponse = analysis.text; // AI 응답 저장
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
     if (bad.isInappropriate && bad.reasons.length >= 4) {
@@ -757,23 +761,22 @@ async function handleVideoCensorship(file, env) {
       };
       
       const reReview = await callQwenAPI(dashscopeApiKey, reReviewBody);
-      console.log('[비디오 재검토 AI 응답]:', reReview.text);
       if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-        return { ok: true };
+        return { ok: true, aiResponse: aiResponse + '\n[재검토]: ' + reReview.text };
       }
     }
     
     if (bad.isInappropriate) {
       console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
-      return { ok: false, response: new Response(JSON.stringify({
+      return { ok: false, aiResponse: aiResponse, response: new Response(JSON.stringify({
           success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
         }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
     }
-    return { ok: true };
+    return { ok: true, aiResponse: aiResponse };
   } catch (e) {
     console.log('handleVideoCensorship 오류:', e);
-    return { ok: false, response: new Response(JSON.stringify({
+    return { ok: false, aiResponse: null, response: new Response(JSON.stringify({
         success: false, error: `동영상 검열 중 오류 발생: ${e.message}`
       }), { status: 500, headers: { 'Content-Type': 'application/json' } }) };
   }
@@ -830,9 +833,6 @@ async function callQwenAPI(apiKey, requestBody) {
         console.log('Qwen API 응답 파싱 실패: 빈 응답');
         return { success: false, error: 'Qwen API 응답에서 텍스트를 추출할 수 없습니다.' };
       }
-
-      // AI 응답 콘솔 출력
-      console.log('[Qwen AI 응답]:', responseText);
 
       return { success: true, text: responseText };
     } catch (e) {
