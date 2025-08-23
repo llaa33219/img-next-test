@@ -524,319 +524,73 @@ async function handleUpload(request, env) {
   });
 }
 
-// 이미지 압축 함수 - WebP로 변환 (10MB 이하로)
-async function compressImageToWebP(file, targetSizeMB = 10) {
-  try {
-    console.log(`[이미지 압축] 원본 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB, 목표 크기: ${targetSizeMB}MB`);
-    
-    // 이미지를 Canvas로 로드
-    const canvas = new OffscreenCanvas(1, 1);
-    const ctx = canvas.getContext('2d');
-    
-    // 이미지 데이터 읽기
-    const arrayBuffer = await file.arrayBuffer();
-    const imageData = new Uint8Array(arrayBuffer);
-    
-    // ImageBitmap 생성
-    const bitmap = await createImageBitmap(file);
-    
-    // Canvas 크기 설정 (해상도 조정으로 압축)
-    let scaleFactor = 1;
-    const targetSize = targetSizeMB * 1024 * 1024;
-    
-    // 해상도 초기 조정
-    if (file.size > targetSize) {
-      scaleFactor = Math.sqrt(targetSize / file.size);
-      scaleFactor = Math.max(0.3, Math.min(1, scaleFactor)); // 0.3 ~ 1.0 범위
-    }
-    
-    const newWidth = Math.floor(bitmap.width * scaleFactor);
-    const newHeight = Math.floor(bitmap.height * scaleFactor);
-    
-    canvas.width = newWidth;
-    canvas.height = newHeight;
-    
-    // 이미지 드로잉
-    ctx.drawImage(bitmap, 0, 0, newWidth, newHeight);
-    
-    // WebP로 변환 (품질 조정으로 압축)
-    let quality = 0.8;
-    let compressedBlob;
-    
-    // 품질을 점진적으로 낮춰가며 목표 크기 달성
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        compressedBlob = await canvas.convertToBlob({
-          type: 'image/webp',
-          quality: quality
-        });
-        
-        console.log(`[압축 시도 ${attempt + 1}] 크기: ${(compressedBlob.size / 1024 / 1024).toFixed(2)}MB, 품질: ${quality}`);
-        
-        if (compressedBlob.size <= targetSize || quality <= 0.1) {
-          break;
-        }
-        
-        quality = Math.max(0.1, quality - 0.15);
-      } catch (error) {
-        console.log(`[압축 시도 ${attempt + 1} 실패]`, error);
-        if (attempt === 4) {
-          // 압축 실패시 원본 반환
-          return file;
-        }
-      }
-    }
-    
-    if (compressedBlob && compressedBlob.size < file.size) {
-      console.log(`[이미지 압축 성공] ${(file.size / 1024 / 1024).toFixed(2)}MB → ${(compressedBlob.size / 1024 / 1024).toFixed(2)}MB`);
-      
-      // Blob을 File 객체로 변환
-      const compressedFile = new File([compressedBlob], file.name.replace(/\.[^/.]+$/, '.webp'), {
-        type: 'image/webp',
-        lastModified: Date.now()
-      });
-      
-      return compressedFile;
-    } else {
-      console.log(`[이미지 압축] 압축 효과 없음, 원본 사용`);
-      return file;
-    }
-    
-      } catch (error) {
-    console.log('[이미지 압축 실패]', error);
-    return file; // 압축 실패시 원본 반환
-  }
-}
-
-// 비디오 압축 함수 - WebM으로 변환 (100MB 이하로)
-async function compressVideoToWebM(file, targetSizeMB = 100) {
-  try {
-    console.log(`[비디오 압축] 원본 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB, 목표 크기: ${targetSizeMB}MB`);
-    
-    // Worker 환경에서 MediaRecorder API 사용
-    const videoUrl = URL.createObjectURL(file);
-    const video = new OffscreenCanvas(1, 1);
-    
-    try {
-      // 비디오 메타데이터 처리를 위한 간단한 압축 시뮬레이션
-      const targetSize = targetSizeMB * 1024 * 1024;
-      
-      if (file.size <= targetSize) {
-        console.log(`[비디오 압축] 이미 목표 크기 이하, 원본 사용`);
-        return file;
-      }
-      
-      // 비디오 압축은 복잡하므로 간단한 학습 버전만 구현
-      // 실제 환경에서는 FFmpeg.wasm 또는 외부 서비스 사용 권장
-      
-      // 비디오가 너무 큰 경우 경고 메시지
-      if (file.size > targetSize * 2) {
-        console.log(`[비디오 압축 경고] 파일이 너무 큽니다. 외부 압축 도구 사용을 권장합니다.`);
-      }
-      
-      // 기본적으로 원본 반환 (비디오 압축은 복잡하므로)
-      return file;
-      
-    } finally {
-      URL.revokeObjectURL(videoUrl);
-    }
-    
-      } catch (error) {
-    console.log('[비디오 압축 실패]', error);
-    return file; // 압축 실패시 원본 반환
-  }
-}
-
-// 이미지 검열 - DashScope API 사용
+// 이미지 검열 - base64 인코딩 사용
 async function handleImageCensorship(file, env) {
   try {
     console.log(`이미지 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     const dashscopeApiKey = env.DASHSCOPE_API_KEY;
-    
-    // API 키 디버깅 정보 (보안상 일부만 표시)
-    console.log(`[이미지 검열 API 키 확인] 키 존재 여부: ${!!dashscopeApiKey}`);
-    if (dashscopeApiKey) {
-      console.log(`[이미지 검열 API 키 확인] 키 길이: ${dashscopeApiKey.length}`);
-      console.log(`[이미지 검열 API 키 확인] 키 앞 4자리: ${dashscopeApiKey.substring(0, 4)}...`);
-      console.log(`[이미지 검열 API 키 확인] 키 뒤 4자리: ...${dashscopeApiKey.substring(dashscopeApiKey.length - 4)}`);
-    }
-    
     if (!dashscopeApiKey) {
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: 'DashScope API 키가 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
-    
-    // 10MB 초과시 압축
-    let processedFile = file;
-    if (file.size > 10 * 1024 * 1024) {
-      console.log(`[이미지 검열] 10MB 초과, WebP 압축 진행`);
-      processedFile = await compressImageToWebP(file);
-    }
+
+    // 이미지를 base64로 인코딩
+    console.log(`[이미지 인코딩] Base64 변환 시작`);
+    const buffer = await file.arrayBuffer();
+    const base64Image = arrayBufferToBase64(buffer);
+    console.log(`[이미지 인코딩] 완료`);
 
 
-
-    // DashScope API를 사용한 이미지 분석
-    try {
-      // 이미지를 base64로 인코딩
-      const buffer = await processedFile.arrayBuffer();
-      const base64Image = arrayBufferToBase64(buffer);
-      
-      // DashScope 재시도 로직으로 API 호출
-      console.log(`[DashScope API] 이미지 분석 요청 시작`);
-      
-      const apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
-      
+    // 검열 요청 - OpenAI 호환 형식
     const requestBody = {
-        model: 'qwen-vl-plus',
-        input: {
-          messages: [
+      model: 'qwen-vl-max',
+      messages: [
+        {
+          role: 'user',
+          content: [
             {
-              role: 'user',
-              content: [
-                {
-                  text: "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
-            "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
-            "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-            "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-            "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-            "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-            "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-            "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-            "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-            "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
-            "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-            "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-            "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-            "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-            "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-            "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-            "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-            "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-           },
-                {
-                  image: `data:${processedFile.type};base64,${base64Image}`
-                }
-              ]
+              type: 'text',
+              text:
+                "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+                "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
+                "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+                "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+                "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+                "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+                "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+                "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+                "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+                "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
+                "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+                "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+                "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+                "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+                "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+                "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+                "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+                "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${file.type};base64,${base64Image}`
+              }
             }
           ]
-        },
-        parameters: {
-        temperature: 0.05, 
-          top_k: 20,
-          top_p: 0.8,
-          max_tokens: 400
         }
-      };
-      
-      let analysisResponse;
-      let attempt = 0;
-      const maxRetries = 3;
-      
-      // 재시도 로직 사용
-      while (attempt < maxRetries) {
-        try {
-          console.log(`[DashScope API] 시도 ${attempt + 1}/${maxRetries}`);
-          console.log(`[DashScope API] 요청 URL: ${apiUrl}`);
-          console.log(`[DashScope API] 헤더 확인 - X-DashScope-API-Key: ${dashscopeApiKey.substring(0, 8)}...`);
-          
-          analysisResponse = await fetch(apiUrl, {
-            method: 'POST',
-            headers: {
-              'X-DashScope-API-Key': dashscopeApiKey,
-              'Content-Type': 'application/json',
-              'X-DashScope-Async': 'enable' // 비동기 처리 활성화 시도
-            },
-            body: JSON.stringify(requestBody)
-          });
-          
-          console.log(`[DashScope API] 응답 상태: ${analysisResponse.status} ${analysisResponse.statusText}`);
-          console.log(`[DashScope API] 응답 헤더:`, Object.fromEntries(analysisResponse.headers));
-          
-          if (analysisResponse.ok) {
-            console.log(`[DashScope API] 성공 - 시도 ${attempt + 1}`);
-            break;
-          } else {
-            throw new Error(`HTTP ${analysisResponse.status}: ${analysisResponse.statusText}`);
-          }
-        } catch (error) {
-          attempt++;
-          console.log(`[DashScope API 오류] 시도 ${attempt}/${maxRetries}: ${error.message}`);
-          
-          // 401 오류인 경우 상세 정보 출력
-          if (error.message.includes('401') || error.message.includes('Unauthorized')) {
-            console.log(`[DashScope API 401 오류 디버깅]`);
-            console.log(`- API 키 길이: ${dashscopeApiKey.length}`);
-            console.log(`- API 키 형식: ${dashscopeApiKey.startsWith('sk-') ? 'OpenAI 스타일 (sk-)' : 'DashScope 표준 형식'}`);
-            console.log(`- 요청 헤더: X-DashScope-API-Key: ${dashscopeApiKey.substring(0, 8)}...`);
-            console.log(`- 엔드포인트: ${apiUrl}`);
-            
-            // 응답 본문도 확인
-            try {
-              const errorResponse = await analysisResponse.text();
-              console.log(`- 오류 응답 본문:`, errorResponse);
-            } catch (e) {
-              console.log(`- 오류 응답 본문 읽기 실패:`, e.message);
-            }
-          }
-          
-          if (attempt >= maxRetries) {
-            throw new Error(`API 호출 실패 (최대 재시도 초과): ${error.message}`);
-          }
-          
-          // 재시도 전 대기
-          const delay = Math.pow(2, attempt) * 1000; // 지수 백오프: 1s, 2s, 4s
-          console.log(`[DashScope API] ${delay}ms 후 재시도...`);
-          await new Promise(r => setTimeout(r, delay));
-        }
-      }
-            
-      let analysisResult;
-      try {
-        analysisResult = await analysisResponse.json();
-        console.log(`[DashScope API] 이미지 분석 완료`);
-      } catch (parseError) {
-        console.log('DashScope JSON 파싱 오류:', parseError);
-        const responseText = await analysisResponse.text();
-        console.log('원본 응답:', responseText);
-        throw new Error(`API 응답 파싱 실패: ${parseError.message}`);
-      }
-      
-      // DashScope 응답에서 텍스트 추출 (다양한 형식 지원)
-      let responseText = '';
-      
-      // 형식 1: output.choices[0].message.content
-      if (analysisResult.output?.choices?.[0]?.message?.content) {
-        const content = analysisResult.output.choices[0].message.content;
-        if (typeof content === 'string') {
-          responseText = content;
-        } else if (Array.isArray(content)) {
-          responseText = content.map(item => item.text || item.content || '').join('');
-        }
-      }
-      // 형식 2: output.text
-      else if (analysisResult.output?.text) {
-        responseText = analysisResult.output.text;
-      }
-      // 형식 3: choices[0].text (GPT 스타일)
-      else if (analysisResult.choices?.[0]?.text) {
-        responseText = analysisResult.choices[0].text;
-      }
-      // 형식 4: text 직접 필드
-      else if (analysisResult.text) {
-        responseText = analysisResult.text;
-      }
-      
-      if (!responseText) {
-        console.log('DashScope 응답 구조:', JSON.stringify(analysisResult, null, 2));
-        throw new Error('분석 결과를 찾을 수 없습니다. API 응답 형식을 확인해주세요.');
-      }
-      
-      console.log(`[DashScope API] 분석 결과 추출 완료: ${responseText.substring(0, 100)}...`);
-      
-      // 분석 결과 파싱
-      const bad = isInappropriateContent(responseText.trim());
+      ],
+      temperature: 0.05,
+      max_tokens: 400
+    };
+
+    const analysis = await callQwenAPI(dashscopeApiKey, requestBody);
+    if (!analysis.success) {
+      throw new Error(analysis.error);
+    }
+
+    const bad = isInappropriateContent(analysis.text);
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
     if (bad.isInappropriate && bad.reasons.length >= 4) {
@@ -844,57 +598,35 @@ async function handleImageCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-          model: 'qwen-vl-plus',
-          input: {
-            messages: [
+        model: 'qwen-vl-max',
+        messages: [
+          {
+            role: 'user',
+            content: [
               {
-                role: 'user',
-                content: [
-                  {
-                    text: "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-              "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
-              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-             },
-                  {
-                    image: `data:${processedFile.type};base64,${base64Image}`
-                  }
-                ]
+                type: 'text',
+                text:
+                  "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+                  "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
+                  "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:${file.type};base64,${base64Image}`
+                }
               }
             ]
-          },
-          parameters: {
-          temperature: 0.0, 
-            top_k: 10,
-            top_p: 0.7,
-            max_tokens: 50
           }
-        };
-        
-        const reReviewResp = await fetch(apiUrl, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${dashscopeApiKey}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(reReviewBody)
-        });
-        
-        if (reReviewResp.ok) {
-          const reReviewResult = await reReviewResp.json();
-          let reReviewText = '';
-          if (reReviewResult.output?.choices?.[0]?.message?.content) {
-            const content = reReviewResult.output.choices[0].message.content;
-            if (typeof content === 'string') {
-              reReviewText = content;
-            } else if (Array.isArray(content)) {
-              reReviewText = content.map(item => item.text || '').join('');
-            }
-          }
-          
-          if (reReviewText.toLowerCase().includes('appropriate') && !reReviewText.toLowerCase().includes('inappropriate')) {
+        ],
+        temperature: 0.0,
+        max_tokens: 50
+      };
+      
+      const reReview = await callQwenAPI(dashscopeApiKey, reReviewBody);
+      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[이미지 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
         return { ok: true };
-          }
       }
     }
     
@@ -906,10 +638,6 @@ async function handleImageCensorship(file, env) {
       };
     }
     return { ok: true };
-    } catch (error) {
-      console.log('[DashScope API 오류]', error);
-      throw error;
-    }
   } catch (e) {
     console.log('handleImageCensorship 오류:', e);
     return { ok: false, response: new Response(JSON.stringify({
@@ -919,7 +647,7 @@ async function handleImageCensorship(file, env) {
   }
 }
 
-// 동영상 검열 - DashScope API 사용
+// 동영상 검열 - base64 인코딩 사용
 async function handleVideoCensorship(file, env) {
   try {
     console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
@@ -931,149 +659,62 @@ async function handleVideoCensorship(file, env) {
       };
     }
 
-    // 100MB 초과시 압축
-    let processedFile = file;
-    if (file.size > 100 * 1024 * 1024) {
-      console.log(`[비디오 검열] 100MB 초과, WebM 압축 진행`);
-      processedFile = await compressVideoToWebM(file);
-    }
 
 
+    // 비디오를 base64로 인코딩
+    console.log(`[동영상 인코딩] Base64 변환 시작`);
+    const buffer = await file.arrayBuffer();
+    const base64Video = arrayBufferToBase64(buffer);
+    console.log(`[동영상 인코딩] 완료`);
 
-    // DashScope API를 사용한 비디오 분석
-    try {
-      // 비디오를 base64로 인코딩 (실제 환경에서는 큰 비디오의 경우 청크 업로드 필요)
-      const buffer = await processedFile.arrayBuffer();
-      const base64Video = arrayBufferToBase64(buffer);
-      
-      // DashScope 재시도 로직으로 비디오 API 호출
-      console.log(`[DashScope API] 비디오 분석 요청 시작`);
-      
-      const apiUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
-      
-      const requestBody = {
-        model: 'qwen-vl-plus',
-        input: {
-          messages: [
+
+    // 검열 요청 - OpenAI 호환 형식
+    const requestBody = {
+      model: 'qwen-vl-max',
+      messages: [
+        {
+          role: 'user',
+          content: [
             {
-              role: 'user',
-              content: [
-                {
-                  text: "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
-                    "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
-                    "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
-                    "Consider the entire video duration and any content that appears briefly. " +
-                    "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-                    "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-                    "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-                    "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-                    "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-                    "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-                    "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
-                    "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-                    "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-                    "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-                    "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-                    "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-                    "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-                    "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-                    "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
-                },
-                {
-                  video: `data:${processedFile.type};base64,${base64Video}`
-                }
-              ]
+              type: 'text',
+              text:
+                "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
+                "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
+                "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
+                "Consider the entire video duration and any content that appears briefly. " +
+                "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+                "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+                "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+                "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+                "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+                "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+                "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text or audio): true/false\n" +
+                "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+                "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+                "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+                "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+                "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+                "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+                "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
+                "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+            },
+            {
+              type: 'video_url',
+              video_url: {
+                url: `data:${file.type};base64,${base64Video}`
+              }
             }
           ]
-        },
-        parameters: {
-          temperature: 0.05,
-          top_k: 20,
-          top_p: 0.8,
-          max_tokens: 400
         }
-      };
-      
-      let analysisResponse;
-      let attempt = 0;
-      const maxRetries = 3;
-      
-      // 재시도 로직 사용
-      while (attempt < maxRetries) {
-        try {
-          console.log(`[DashScope API] 비디오 시도 ${attempt + 1}/${maxRetries}`);
-          
-          analysisResponse = await fetch(apiUrl, {
-          method: 'POST',
-          headers: {
-              'X-DashScope-API-Key': dashscopeApiKey,
-              'Content-Type': 'application/json',
-              'X-DashScope-Async': 'enable'
-            },
-            body: JSON.stringify(requestBody)
-          });
-          
-          if (analysisResponse.ok) {
-            console.log(`[DashScope API] 비디오 성공 - 시도 ${attempt + 1}`);
-            break;
-          } else {
-            throw new Error(`HTTP ${analysisResponse.status}: ${analysisResponse.statusText}`);
-          }
-        } catch (error) {
-          attempt++;
-          console.log(`[DashScope API 비디오 오류] 시도 ${attempt}/${maxRetries}: ${error.message}`);
-          
-          if (attempt >= maxRetries) {
-            throw new Error(`비디오 API 호출 실패 (최대 재시도 초과): ${error.message}`);
-          }
-          
-          const delay = Math.pow(2, attempt) * 1000;
-          console.log(`[DashScope API] ${delay}ms 후 비디오 재시도...`);
-          await new Promise(r => setTimeout(r, delay));
-        }
-      }
-      
-      let analysisResult;
-      try {
-        analysisResult = await analysisResponse.json();
-        console.log(`[DashScope API] 비디오 분석 완료`);
-      } catch (parseError) {
-        console.log('DashScope 비디오 JSON 파싱 오류:', parseError);
-        const responseText = await analysisResponse.text();
-        console.log('비디오 원본 응답:', responseText);
-        throw new Error(`비디오 API 응답 파싱 실패: ${parseError.message}`);
-      }
-      
-      // DashScope 응답에서 텍스트 추출 (다양한 형식 지원)
-      let responseText = '';
-      
-      if (analysisResult.output?.choices?.[0]?.message?.content) {
-        const content = analysisResult.output.choices[0].message.content;
-        if (typeof content === 'string') {
-          responseText = content;
-        } else if (Array.isArray(content)) {
-          responseText = content.map(item => item.text || item.content || '').join('');
-        }
-      }
-      else if (analysisResult.output?.text) {
-        responseText = analysisResult.output.text;
-      }
-      else if (analysisResult.choices?.[0]?.text) {
-        responseText = analysisResult.choices[0].text;
-      }
-      else if (analysisResult.text) {
-        responseText = analysisResult.text;
-      }
-      
-      if (!responseText) {
-        console.log('DashScope 비디오 응답 구조:', JSON.stringify(analysisResult, null, 2));
-        throw new Error('비디오 분석 결과를 찾을 수 없습니다. API 응답 형식을 확인해주세요.');
-      }
-      
-      console.log(`[DashScope API] 비디오 분석 결과 추출 완료: ${responseText.substring(0, 100)}...`);
-      
-      // 분석 결과 파싱
-      const bad = isInappropriateContent(responseText.trim());
+      ],
+      temperature: 0.05,
+      max_tokens: 400
+    };
+    const analysis = await callQwenAPI(dashscopeApiKey, requestBody);
+    if (!analysis.success) {
+      throw new Error(analysis.error);
+    }
+    const bad = isInappropriateContent(analysis.text);
     
     // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
     if (bad.isInappropriate && bad.reasons.length >= 4) {
@@ -1081,57 +722,35 @@ async function handleVideoCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-          model: 'qwen-vl-plus',
-          input: {
-            messages: [
+        model: 'qwen-vl-max',
+        messages: [
+          {
+            role: 'user',
+            content: [
               {
-                role: 'user',
-                content: [
-                  {
-                    text: "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-              "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
-              "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-             },
-                  {
-                    video: `data:${processedFile.type};base64,${base64Video}`
-                  }
-                ]
+                type: 'text',
+                text:
+                  "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
+                  "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
+                  "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
+              },
+              {
+                type: 'video_url',
+                video_url: {
+                  url: `data:${file.type};base64,${base64Video}`
+                }
               }
             ]
-          },
-          parameters: {
-          temperature: 0.0, 
-            top_k: 10,
-            top_p: 0.7,
-            max_tokens: 50
           }
-        };
-        
-        const reReviewResp = await fetch(apiUrl, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${dashscopeApiKey}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(reReviewBody)
-        });
-        
-        if (reReviewResp.ok) {
-          const reReviewResult = await reReviewResp.json();
-          let reReviewText = '';
-          if (reReviewResult.output?.choices?.[0]?.message?.content) {
-            const content = reReviewResult.output.choices[0].message.content;
-            if (typeof content === 'string') {
-              reReviewText = content;
-            } else if (Array.isArray(content)) {
-              reReviewText = content.map(item => item.text || '').join('');
-            }
-          }
-          
-          if (reReviewText.toLowerCase().includes('appropriate') && !reReviewText.toLowerCase().includes('inappropriate')) {
+        ],
+        temperature: 0.0,
+        max_tokens: 50
+      };
+      
+      const reReview = await callQwenAPI(dashscopeApiKey, reReviewBody);
+      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
         console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
         return { ok: true };
-          }
       }
     }
     
@@ -1142,10 +761,6 @@ async function handleVideoCensorship(file, env) {
         }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
     }
     return { ok: true };
-    } catch (error) {
-      console.log('[DashScope API 오류]', error);
-      throw error;
-    }
   } catch (e) {
     console.log('handleVideoCensorship 오류:', e);
     return { ok: false, response: new Response(JSON.stringify({
@@ -1154,8 +769,71 @@ async function handleVideoCensorship(file, env) {
   }
 }
 
-// DashScope API 호출 함수 - 사용하지 않음 (직접 fetch 사용)
-// handleImageCensorship와 handleVideoCensorship에서 직접 DashScope API를 호출함
+// Qwen API 호출 함수
+async function callQwenAPI(apiKey, requestBody) {
+  let retryCount = 0;
+  const maxRetries = 3, retryDelay = 2000;
+  while (retryCount < maxRetries) {
+    try {
+      const apiUrl = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions';
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(requestBody)
+      });
+      if (!response.ok) {
+        if (response.status === 429 && retryCount < maxRetries - 1) {
+          retryCount++;
+          console.log(`할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
+          await new Promise(r => setTimeout(r, retryDelay));
+          continue;
+        }
+        console.log('Qwen API 호출 실패:', {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries([...response.headers])
+        });
+        const errText = await response.text();
+        return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
+      }
+      const data = await response.json();
+      
+      // Qwen API OpenAI 호환 응답 구조 처리
+      const choice = data.choices?.[0];
+      if (!choice?.message?.content) {
+        console.log('Qwen API 응답 상태:', {
+          hasChoices: !!data.choices,
+          choicesLength: data.choices?.length || 0,
+          hasMessage: !!choice?.message,
+          hasContent: !!choice?.message?.content,
+          responseKeys: Object.keys(data || {})
+        });
+        return { success: false, error: 'Qwen API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
+      }
+
+      const responseText = choice.message.content;
+
+      if (!responseText) {
+        console.log('Qwen API 응답 파싱 실패: 빈 응답');
+        return { success: false, error: 'Qwen API 응답에서 텍스트를 추출할 수 없습니다.' };
+      }
+
+      return { success: true, text: responseText };
+    } catch (e) {
+      retryCount++;
+      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
+      if (retryCount < maxRetries) {
+        await new Promise(r => setTimeout(r, retryDelay));
+      } else {
+        return { success: false, error: `API 호출 오류: ${e.message}` };
+      }
+    }
+  }
+  return { success: false, error: '최대 재시도 횟수 초과' };
+}
 
 // =======================
 // 부적절한 내용 분석 함수 (강화된 버전)
@@ -1964,7 +1642,7 @@ function renderApiDocs(host) {
     <h1>이미지 공유 API 문서</h1>
   </div>
   
-  <p>이 API는 외부 애플리케이션에서 이미지 및 동영상을 업로드하고 공유할 수 있는 기능을 제공합니다. 모든 콘텐츠는 업로드 전 AI 기반 자동 검열을 거쳐 부적절한 콘텐츠를 차단합니다.</p>
+  <p>이 API는 외부 애플리케이션에서 이미지 및 동영상을 업로드하고 공유할 수 있는 기능을 제공합니다. 모든 콘텐츠는 업로드 전 자동 검열됩니다.</p>
   
   <h2>엔드포인트</h2>
   
