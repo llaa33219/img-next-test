@@ -25,7 +25,7 @@ export async function handleImageCensorship(file, env) {
     console.log(`[이미지 인코딩] Base64 변환 시작`);
     const buffer = await file.arrayBuffer();
     const base64Image = arrayBufferToBase64(buffer);
-    console.log(`[이미지 인코딩] 완료`);
+    console.log(`[이미지 인코딩] 완료 - Base64 길이: ${base64Image.length} 문자`);
 
     // 검열 요청 - OpenAI 호환 형식
     const requestBody = {
@@ -37,7 +37,7 @@ export async function handleImageCensorship(file, env) {
             {
               type: 'text',
               text:
-                "Analyze this image for inappropriate content. Be extremely precise and thorough. " +
+                "Analyze this image for inappropriate content. Be extremely strict and thorough. " +
                 "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
                 "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
                 "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
@@ -53,8 +53,7 @@ export async function handleImageCensorship(file, env) {
                 "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
                 "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
                 "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-                "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-                "and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+                "Be strict. Mark as true if there is any doubt about appropriateness."
             },
             {
               type: 'image_url',
@@ -65,62 +64,37 @@ export async function handleImageCensorship(file, env) {
           ]
         }
       ],
-      temperature: 0.05,
+      temperature: 0.1,
       max_tokens: 400
     };
+
+    console.log(`[이미지 검열 API 요청] URL: https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`);
+    console.log(`[이미지 검열 API 요청] 모델: ${requestBody.model}`);
+    console.log(`[이미지 검열 API 요청] 이미지 타입: ${file.type}`);
+    console.log(`[이미지 검열 API 요청] Base64 이미지 URL 길이: ${requestBody.messages[0].content[1].image_url.url.length} 문자`);
 
     const analysis = await callQwenAPI(dashscopeApiKey, requestBody);
     if (!analysis.success) {
       throw new Error(analysis.error);
     }
 
-    const bad = isInappropriateContent(analysis.text);
+    console.log(`[이미지 검열 API 응답] 전체 텍스트:\n${analysis.text}`);
     
-    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
-    if (bad.isInappropriate && bad.reasons.length >= 4) {
-      console.log(`[이미지 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
-      
-      // 보수적 재검토 요청
-      const reReviewBody = {
-        model: 'qwen3-vl-235b-a22b-instruct',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text:
-                  "Re-examine this image very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-                  "Many legitimate, artistic, educational, or everyday content should NOT be flagged. " +
-                  "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-              },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: `data:${file.type};base64,${base64Image}`
-                }
-              }
-            ]
-          }
-        ],
-        temperature: 0.0,
-        max_tokens: 50
-      };
-      
-      const reReview = await callQwenAPI(dashscopeApiKey, reReviewBody);
-      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
-        console.log(`[이미지 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-        return { ok: true };
-      }
+    const bad = isInappropriateContent(analysis.text);
+    console.log(`[이미지 검열 판단] 부적절 여부: ${bad.isInappropriate}`);
+    console.log(`[이미지 검열 판단] 검출된 카테고리 수: ${bad.reasons.length}`);
+    if (bad.reasons.length > 0) {
+      console.log(`[이미지 검열 판단] 검출된 카테고리: ${bad.reasons.join(", ")}`);
     }
     
     if (bad.isInappropriate) {
-      console.log(`[이미지 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
+      console.log(`[이미지 검열 완료] 부적절한 콘텐츠 감지 - 업로드 거부`);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`
         }), { status: 400, headers: { 'Content-Type': 'application/json' } })
       };
     }
+    console.log(`[이미지 검열 완료] 적절한 콘텐츠 - 업로드 허용`);
     return { ok: true };
   } catch (e) {
     console.log('handleImageCensorship 오류:', e);
@@ -152,7 +126,7 @@ export async function handleVideoCensorship(file, env) {
     console.log(`[동영상 인코딩] Base64 변환 시작`);
     const buffer = await file.arrayBuffer();
     const base64Video = arrayBufferToBase64(buffer);
-    console.log(`[동영상 인코딩] 완료`);
+    console.log(`[동영상 인코딩] 완료 - Base64 길이: ${base64Video.length} 문자`);
 
     // 검열 요청 - OpenAI 호환 형식
     const requestBody = {
@@ -164,7 +138,7 @@ export async function handleVideoCensorship(file, env) {
             {
               type: 'text',
               text:
-                "Analyze this video for inappropriate content frame by frame. Be extremely precise and thorough. " +
+                "Analyze this video for inappropriate content frame by frame. Be extremely strict and thorough. " +
                 "Look for any attempts to bypass detection through quick flashes, partial covering, artistic filters, blurring, or text obfuscation. " +
                 "Analyze any visible text or audio for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings. " +
                 "Consider the entire video duration and any content that appears briefly. " +
@@ -181,8 +155,7 @@ export async function handleVideoCensorship(file, env) {
                 "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
                 "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
                 "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-                "Be conservative but accurate. Normal everyday content, artistic expression, educational material, " +
-                "gaming content, and legitimate creative content should be marked as false. Only mark as true if clearly inappropriate."
+                "Be strict. Mark as true if there is any doubt about appropriateness."
             },
             {
               type: 'video_url',
@@ -193,60 +166,36 @@ export async function handleVideoCensorship(file, env) {
           ]
         }
       ],
-      temperature: 0.05,
+      temperature: 0.1,
       max_tokens: 400
     };
+    
+    console.log(`[동영상 검열 API 요청] URL: https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`);
+    console.log(`[동영상 검열 API 요청] 모델: ${requestBody.model}`);
+    console.log(`[동영상 검열 API 요청] 비디오 타입: ${file.type}`);
+    console.log(`[동영상 검열 API 요청] Base64 비디오 URL 길이: ${requestBody.messages[0].content[1].video_url.url.length} 문자`);
     
     const analysis = await callQwenAPI(dashscopeApiKey, requestBody);
     if (!analysis.success) {
       throw new Error(analysis.error);
     }
-    const bad = isInappropriateContent(analysis.text);
     
-    // 추가 검증: 너무 많은 카테고리가 true로 나온 경우 재검토
-    if (bad.isInappropriate && bad.reasons.length >= 4) {
-      console.log(`[비디오 과도한 검열 감지] ${bad.reasons.length}개 카테고리 검출, 재검토 필요`);
-      
-      // 보수적 재검토 요청
-      const reReviewBody = {
-        model: 'qwen3-vl-235b-a22b-instruct',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text:
-                  "Re-examine this video very carefully. Be EXTREMELY conservative and only flag content that is clearly and unambiguously inappropriate. " +
-                  "Many legitimate, artistic, educational, gaming, or everyday content should NOT be flagged. " +
-                  "Consider context and intent. Only respond 'INAPPROPRIATE' if you are absolutely certain the content violates guidelines, otherwise respond 'APPROPRIATE'."
-              },
-              {
-                type: 'video_url',
-                video_url: {
-                  url: `data:${file.type};base64,${base64Video}`
-                }
-              }
-            ]
-          }
-        ],
-        temperature: 0.0,
-        max_tokens: 50
-      };
-      
-      const reReview = await callQwenAPI(dashscopeApiKey, reReviewBody);
-      if (reReview.success && reReview.text.toLowerCase().includes('appropriate')) {
-        console.log(`[비디오 재검토 결과] 적절한 콘텐츠로 판정, 통과 처리`);
-        return { ok: true };
-      }
+    console.log(`[동영상 검열 API 응답] 전체 텍스트:\n${analysis.text}`);
+    
+    const bad = isInappropriateContent(analysis.text);
+    console.log(`[동영상 검열 판단] 부적절 여부: ${bad.isInappropriate}`);
+    console.log(`[동영상 검열 판단] 검출된 카테고리 수: ${bad.reasons.length}`);
+    if (bad.reasons.length > 0) {
+      console.log(`[동영상 검열 판단] 검출된 카테고리: ${bad.reasons.join(", ")}`);
     }
     
     if (bad.isInappropriate) {
-      console.log(`[비디오 검열 완료] 부적절한 콘텐츠 감지: ${bad.reasons.join(", ")}`);
+      console.log(`[동영상 검열 완료] 부적절한 콘텐츠 감지 - 업로드 거부`);
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: `업로드가 거부되었습니다. 부적절한 콘텐츠 감지: ${bad.reasons.join(', ')}`
         }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
     }
+    console.log(`[동영상 검열 완료] 적절한 콘텐츠 - 업로드 허용`);
     return { ok: true };
   } catch (e) {
     console.log('handleVideoCensorship 오류:', e);
@@ -268,35 +217,39 @@ async function callQwenAPI(apiKey, requestBody) {
   while (retryCount < maxRetries) {
     try {
       const apiUrl = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions';
+      console.log(`[Qwen API 호출] 시도 ${retryCount + 1}/${maxRetries}`);
+      
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
+          'Authorization': `Bearer ${apiKey.substring(0, 10)}...`
         },
         body: JSON.stringify(requestBody)
       });
+      
+      console.log(`[Qwen API 응답] HTTP 상태: ${response.status} ${response.statusText}`);
+      
       if (!response.ok) {
         if (response.status === 429 && retryCount < maxRetries - 1) {
           retryCount++;
-          console.log(`할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
+          console.log(`[Qwen API] 할당량 초과, 재시도 ${retryCount}/${maxRetries}`);
           await new Promise(r => setTimeout(r, retryDelay));
           continue;
         }
-        console.log('Qwen API 호출 실패:', {
-          status: response.status,
-          statusText: response.statusText,
-          headers: Object.fromEntries([...response.headers])
-        });
+        console.log('[Qwen API 호출 실패] 상태 코드:', response.status);
+        console.log('[Qwen API 호출 실패] 상태 텍스트:', response.statusText);
         const errText = await response.text();
+        console.log('[Qwen API 호출 실패] 응답 본문:', errText);
         return { success: false, error: `API 오류 (${response.status}): ${response.statusText}` };
       }
       const data = await response.json();
+      console.log(`[Qwen API 응답] JSON 파싱 성공`);
       
       // Qwen API OpenAI 호환 응답 구조 처리
       const choice = data.choices?.[0];
       if (!choice?.message?.content) {
-        console.log('Qwen API 응답 상태:', {
+        console.log('[Qwen API 응답 구조 오류]', {
           hasChoices: !!data.choices,
           choicesLength: data.choices?.length || 0,
           hasMessage: !!choice?.message,
@@ -309,14 +262,16 @@ async function callQwenAPI(apiKey, requestBody) {
       const responseText = choice.message.content;
 
       if (!responseText) {
-        console.log('Qwen API 응답 파싱 실패: 빈 응답');
+        console.log('[Qwen API 응답 파싱 실패] 빈 응답');
         return { success: false, error: 'Qwen API 응답에서 텍스트를 추출할 수 없습니다.' };
       }
 
+      console.log(`[Qwen API 성공] 응답 길이: ${responseText.length} 문자`);
       return { success: true, text: responseText };
     } catch (e) {
       retryCount++;
-      console.log(`API 호출 오류, 재시도 ${retryCount}/${maxRetries}:`, e);
+      console.log(`[Qwen API 호출 오류] 재시도 ${retryCount}/${maxRetries}:`, e.message);
+      console.log(`[Qwen API 호출 오류] 스택:`, e.stack);
       if (retryCount < maxRetries) {
         await new Promise(r => setTimeout(r, retryDelay));
       } else {
@@ -333,6 +288,8 @@ async function callQwenAPI(apiKey, requestBody) {
  * @returns {Object} - 부적절 여부와 이유들
  */
 function isInappropriateContent(responseText) {
+  console.log(`[파싱 시작] 응답 텍스트 분석 중...`);
+  
   // 카테고리 인덱스 → 사용자 표시용 이름 매핑 (한국어)
   const categoryMap = {
     1: '성적/노출 콘텐츠',
@@ -353,7 +310,10 @@ function isInappropriateContent(responseText) {
   const flagged = [];
 
   // 응답을 줄별로 순회하며 다양한 패턴 파싱
-  responseText.split(/\r?\n/).forEach((line, lineIndex) => {
+  const lines = responseText.split(/\r?\n/);
+  console.log(`[파싱] 총 ${lines.length}개 줄 분석`);
+  
+  lines.forEach((line, lineIndex) => {
     // 패턴 1: "숫자. true/false" 형태
     let m = line.match(/^\s*([1-9]|1[0-2])\.\s*(true|false)\b/i);
     if (!m) {
@@ -384,12 +344,16 @@ function isInappropriateContent(responseText) {
     if (m) {
       const idx = Number(m[1]);
       const val = m[2].toLowerCase() === 'true';
+      console.log(`[파싱] 줄 ${lineIndex + 1}: 카테고리 ${idx} = ${val ? 'TRUE' : 'false'} | "${line.trim()}"`);
       if (val && categoryMap[idx]) {
         flagged.push(categoryMap[idx]);
+        console.log(`[파싱] ⚠️ 부적절 카테고리 감지: ${categoryMap[idx]}`);
       }
     }
   });
 
+  console.log(`[파싱 완료] 총 ${flagged.length}개 부적절 카테고리 검출`);
+  
   return {
     isInappropriate: flagged.length > 0,
     reasons: flagged
