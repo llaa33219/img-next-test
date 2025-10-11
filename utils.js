@@ -8,9 +8,15 @@
  * @returns {string} - base64 인코딩된 문자열
  */
 export function arrayBufferToBase64(buffer) {
-  let bin = '', bytes = new Uint8Array(buffer);
-  for (let b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin);
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  const chunkSize = 8192;
+  for (let i = 0; i < len; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
 }
 
 /**

@@ -85,11 +85,10 @@ async function compressFileForCensorship(file, type) {
 /**
  * 이미지 검열 - base64 인코딩 사용
  * @param {File} file - 검열할 이미지 파일
- * @param {ArrayBuffer} fileBuffer - 미리 읽은 파일 버퍼 (성능 최적화)
  * @param {Object} env - 환경 변수
  * @returns {Object} - 검열 결과
  */
-export async function handleImageCensorship(file, fileBuffer, env) {
+export async function handleImageCensorship(file, env) {
   try {
     console.log(`이미지 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     const dashscopeApiKey = env.DASHSCOPE_API_KEY;
@@ -102,22 +101,21 @@ export async function handleImageCensorship(file, fileBuffer, env) {
 
     // 5MB 이상인 경우 압축
     const FIVE_MB = 5 * 1024 * 1024;
-    let bufferForCensorship = fileBuffer;
+    let fileForCensorship = file;
     if (file.size > FIVE_MB) {
       console.log(`[이미지 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
-        const compressedFile = await compressFileForCensorship(file, 'image');
-        bufferForCensorship = await compressedFile.arrayBuffer();
-        console.log(`[이미지 압축] 압축된 버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB`);
+        fileForCensorship = await compressFileForCensorship(file, 'image');
       } catch (compressionError) {
-        console.log(`[이미지 압축] 압축 실패, 원본 버퍼로 계속 진행: ${compressionError.message}`);
-        // 압축 실패 시 원본 버퍼로 계속 진행
+        console.log(`[이미지 압축] 압축 실패, 원본으로 계속 진행: ${compressionError.message}`);
+        // 압축 실패 시 원본으로 계속 진행
       }
     }
 
-    // 이미지를 base64로 인코딩 (미리 읽은 버퍼 사용)
-    console.log(`[이미지 인코딩] Base64 변환 시작 (버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB)`);
-    const base64Image = arrayBufferToBase64(bufferForCensorship);
+    // 이미지를 base64로 인코딩
+    console.log(`[이미지 인코딩] Base64 변환 시작`);
+    const buffer = await fileForCensorship.arrayBuffer();
+    const base64Image = arrayBufferToBase64(buffer);
     console.log(`[이미지 인코딩] 완료 - Base64 길이: ${base64Image.length} 문자`);
 
     // 검열 요청 - OpenAI 호환 형식
@@ -151,7 +149,7 @@ export async function handleImageCensorship(file, fileBuffer, env) {
             {
               type: 'image_url',
               image_url: {
-                url: `data:${file.type};base64,${base64Image}`
+                url: `data:${fileForCensorship.type};base64,${base64Image}`
               }
             }
           ]
@@ -163,7 +161,7 @@ export async function handleImageCensorship(file, fileBuffer, env) {
 
     console.log(`[이미지 검열 API 요청] URL: https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`);
     console.log(`[이미지 검열 API 요청] 모델: ${requestBody.model}`);
-    console.log(`[이미지 검열 API 요청] 이미지 타입: ${file.type}`);
+    console.log(`[이미지 검열 API 요청] 이미지 타입: ${fileForCensorship.type}`);
     console.log(`[이미지 검열 API 요청] Base64 이미지 URL 길이: ${requestBody.messages[0].content[1].image_url.url.length} 문자`);
 
     const analysis = await callQwenAPI(dashscopeApiKey, requestBody);
@@ -201,11 +199,10 @@ export async function handleImageCensorship(file, fileBuffer, env) {
 /**
  * 동영상 검열 - base64 인코딩 사용
  * @param {File} file - 검열할 동영상 파일
- * @param {ArrayBuffer} fileBuffer - 미리 읽은 파일 버퍼 (성능 최적화)
  * @param {Object} env - 환경 변수
  * @returns {Object} - 검열 결과
  */
-export async function handleVideoCensorship(file, fileBuffer, env) {
+export async function handleVideoCensorship(file, env) {
   try {
     console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     const dashscopeApiKey = env.DASHSCOPE_API_KEY;
@@ -218,22 +215,21 @@ export async function handleVideoCensorship(file, fileBuffer, env) {
 
     // 5MB 이상인 경우 압축
     const FIVE_MB = 5 * 1024 * 1024;
-    let bufferForCensorship = fileBuffer;
+    let fileForCensorship = file;
     if (file.size > FIVE_MB) {
       console.log(`[동영상 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
-        const compressedFile = await compressFileForCensorship(file, 'video');
-        bufferForCensorship = await compressedFile.arrayBuffer();
-        console.log(`[동영상 압축] 압축된 버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB`);
+        fileForCensorship = await compressFileForCensorship(file, 'video');
       } catch (compressionError) {
-        console.log(`[동영상 압축] 압축 실패, 원본 버퍼로 계속 진행: ${compressionError.message}`);
-        // 압축 실패 시 원본 버퍼로 계속 진행
+        console.log(`[동영상 압축] 압축 실패, 원본으로 계속 진행: ${compressionError.message}`);
+        // 압축 실패 시 원본으로 계속 진행
       }
     }
 
-    // 비디오를 base64로 인코딩 (미리 읽은 버퍼 사용)
-    console.log(`[동영상 인코딩] Base64 변환 시작 (버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB)`);
-    const base64Video = arrayBufferToBase64(bufferForCensorship);
+    // 비디오를 base64로 인코딩
+    console.log(`[동영상 인코딩] Base64 변환 시작`);
+    const buffer = await fileForCensorship.arrayBuffer();
+    const base64Video = arrayBufferToBase64(buffer);
     console.log(`[동영상 인코딩] 완료 - Base64 길이: ${base64Video.length} 문자`);
 
     // 검열 요청 - OpenAI 호환 형식
@@ -268,7 +264,7 @@ export async function handleVideoCensorship(file, fileBuffer, env) {
             {
               type: 'video_url',
               video_url: {
-                url: `data:${file.type};base64,${base64Video}`
+                url: `data:${fileForCensorship.type};base64,${base64Video}`
               }
             }
           ]
@@ -280,7 +276,7 @@ export async function handleVideoCensorship(file, fileBuffer, env) {
     
     console.log(`[동영상 검열 API 요청] URL: https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`);
     console.log(`[동영상 검열 API 요청] 모델: ${requestBody.model}`);
-    console.log(`[동영상 검열 API 요청] 비디오 타입: ${file.type}`);
+    console.log(`[동영상 검열 API 요청] 비디오 타입: ${fileForCensorship.type}`);
     console.log(`[동영상 검열 API 요청] Base64 비디오 URL 길이: ${requestBody.messages[0].content[1].video_url.url.length} 문자`);
     
     const analysis = await callQwenAPI(dashscopeApiKey, requestBody);

@@ -11,7 +11,7 @@ import { generateUniqueCode } from './utils.js';
  * @param {Object} env - 환경 변수
  * @returns {Response} - 응답 객체
  */
-export async function handleUpload(request, env, ctx) {
+export async function handleUpload(request, env) {
   const formData = await request.formData();
   const files = formData.getAll('file');
   let customName = formData.get('customName');
@@ -44,120 +44,184 @@ export async function handleUpload(request, env, ctx) {
     }
   }
 
-  // 병렬 처리: 검열 & R2 업로드
-  const uploadSuccessFiles = [];
-  const uploadFailedFiles = [];
-
+  // 1) 검열 - 다중 업로드시 실패한 파일 수집, 단일 업로드시 즉시 중단
+  console.log(`[검열 시작] ${files.length}개 파일 검열 시작`);
+  const validFiles = [];
+  const failedFiles = [];
+  
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    let r2Key;
-
-    console.log(`[처리 시작] ${i + 1}/${files.length} - ${file.name || 'Unknown'}, ${file.type}, ${(file.size / 1024 / 1024).toFixed(2)}MB`);
-
+    console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.name || 'Unknown'}, ${file.type}, ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+    
     try {
-      // 1. R2 키 결정 (커스텀 이름 또는 자동 생성)
-      if (customName && files.length === 1) {
-        r2Key = customName.replace(/ /g, "_");
-        if (await env.IMAGES.get(r2Key)) {
+      const r = file.type.startsWith('image/')
+        ? await handleImageCensorship(file, env)
+        : await handleVideoCensorship(file, env);
+        
+      if (!r.ok) {
+        console.log(`[검열 실패] ${i + 1}번째 파일에서 검열 실패`);
+        // 기존 응답에서 에러 메시지 추출
+        let errorMessage = '알 수 없는 오류';
+        try {
+          const responseText = await r.response.text();
+          const errorData = JSON.parse(responseText);
+          errorMessage = errorData.error || errorMessage;
+        } catch (e) {
+          console.log('에러 메시지 파싱 실패:', e);
+        }
+        
+        const fileInfo = { 
+          index: i + 1, 
+          name: file.name || 'Unknown', 
+          error: errorMessage 
+        };
+        failedFiles.push(fileInfo);
+        
+        // 단일 파일 업로드시에만 즉시 중단
+        if (files.length === 1) {
           return new Response(JSON.stringify({
             success: false,
-            error: '이미 사용 중인 이름입니다. 다른 이름을 선택해주세요.'
+            error: `파일 검열 실패: ${errorMessage}`
           }), { status: 400, headers: { 'Content-Type': 'application/json' } });
         }
       } else {
-        r2Key = await generateUniqueCode(env);
-      }
-
-      // 2. 파일 버퍼 읽기 (한 번만)
-      const fileBuffer = await file.arrayBuffer();
-      console.log(`[파일 읽기 완료] ${r2Key} - ${(fileBuffer.byteLength / 1024 / 1024).toFixed(2)}MB`);
-
-      // 3. 검열과 R2 업로드 병렬 시작
-      console.log(`[병렬 작업 시작] ${r2Key} - R2 업로드 & 콘텐츠 검열`);
-      const censorshipPromise = file.type.startsWith('image/')
-        ? handleImageCensorship(file, fileBuffer, env)
-        : handleVideoCensorship(file, fileBuffer, env);
-
-      const r2UploadPromise = env.IMAGES.put(r2Key, fileBuffer, {
-        httpMetadata: { contentType: file.type }
-      });
-
-      const [censorshipSettled, r2UploadSettled] = await Promise.allSettled([censorshipPromise, r2UploadPromise]);
-
-      // 4. 결과 처리
-      if (r2UploadSettled.status === 'rejected') {
-        // R2 업로드 실패 시, 심각한 오류로 간주하고 즉시 중단
-        console.log(`[R2 업로드 실패!] ${r2Key}`, r2UploadSettled.reason);
-        throw r2UploadSettled.reason;
-      }
-      console.log(`[R2 업로드 성공] ${r2Key}`);
-
-      if (censorshipSettled.status === 'rejected' || !censorshipSettled.value.ok) {
-        // 검열 실패 또는 오류 시, 이미 업로드된 R2 파일 백그라운드 삭제
-        console.log(`[검열 실패] ${r2Key} - R2에서 파일 삭제 예약`);
-        ctx.waitUntil(env.IMAGES.delete(r2Key));
-
-        let errorMessage = '콘텐츠 검열 중 오류가 발생했습니다.';
-        if (censorshipSettled.status === 'fulfilled' && !censorshipSettled.value.ok) {
-          const errData = await censorshipSettled.value.response.json();
-          errorMessage = errData.error || '부적절한 콘텐츠가 감지되었습니다.';
-        } else if (censorshipSettled.status === 'rejected') {
-          errorMessage = censorshipSettled.reason.message;
-        }
-        
-        const fileInfo = { index: i + 1, name: file.name || 'Unknown', error: errorMessage };
-        uploadFailedFiles.push(fileInfo);
-        
-        if (files.length === 1) {
-          return new Response(JSON.stringify({ success: false, error: `파일 검열 실패: ${errorMessage}` }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-        }
-      } else {
-        // 모든 작업 성공
-        console.log(`[처리 성공] ${r2Key}`);
-        uploadSuccessFiles.push({ index: i + 1, name: file.name || 'Unknown', code: r2Key });
+        console.log(`[검열 통과] ${i + 1}번째 파일 검열 통과`);
+        validFiles.push({ file, index: i + 1 });
       }
     } catch (e) {
-      console.log(`[처리 오류] ${i + 1}번째 파일 처리 중 오류:`, e);
-      const fileInfo = { index: i + 1, name: file.name || 'Unknown', error: `업로드 중 오류: ${e.message}` };
-      uploadFailedFiles.push(fileInfo);
-
+      console.log(`[검열 오류] ${i + 1}번째 파일 검열 중 오류:`, e);
+      const fileInfo = { 
+        index: i + 1, 
+        name: file.name || 'Unknown', 
+        error: `검열 중 오류: ${e.message}` 
+      };
+      failedFiles.push(fileInfo);
+      
+      // 단일 파일 업로드시에만 즉시 중단
       if (files.length === 1) {
-        return new Response(JSON.stringify({ success: false, error: `파일 업로드 중 오류: ${e.message}` }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+        return new Response(JSON.stringify({
+          success: false,
+          error: `파일 검열 중 오류: ${e.message}`
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } });
       }
     }
   }
-
-  // 5. 최종 응답 구성
-  console.log(`[처리 완료] 성공: ${uploadSuccessFiles.length}개, 실패: ${uploadFailedFiles.length}개`);
-
-  if (uploadSuccessFiles.length === 0) {
+  
+  console.log(`[검열 완료] ${validFiles.length}개 파일 검열 통과, ${failedFiles.length}개 파일 실패`);
+  
+  // 모든 파일이 실패한 경우
+  if (validFiles.length === 0) {
     return new Response(JSON.stringify({
       success: false,
-      error: '모든 파일 업로드에 실패했습니다.',
-      failedFiles: uploadFailedFiles
+      error: '모든 파일이 검열에 실패했습니다.',
+      failedFiles: failedFiles
     }), { status: 400, headers: { 'Content-Type': 'application/json' } });
   }
 
-  const codes = uploadSuccessFiles.map(f => f.code);
+  // 2) R2 업로드 - 검열 통과한 파일들만 업로드
+  let codes = [];
+  const uploadSuccessFiles = [];
+  const uploadFailedFiles = [];
+  
+  if (customName && validFiles.length === 1) {
+    customName = customName.replace(/ /g, "_");
+    try {
+      if (await env.IMAGES.get(customName)) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: '이미 사용 중인 이름입니다. 다른 이름을 선택해주세요.'
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
+      console.log(`[R2 업로드] 커스텀 이름으로 업로드 시작: ${customName}`);
+      await env.IMAGES.put(customName, validFiles[0].file.stream(), {
+        httpMetadata: { contentType: validFiles[0].file.type },
+        size: validFiles[0].file.size
+      });
+      codes.push(customName);
+      uploadSuccessFiles.push({
+        index: validFiles[0].index,
+        name: validFiles[0].file.name || 'Unknown',
+        code: customName
+      });
+      console.log(`[R2 업로드] 커스텀 이름 업로드 완료: ${customName}`);
+    } catch (e) {
+      console.log(`[R2 업로드 실패] 커스텀 이름 업로드 오류:`, e);
+      return new Response(JSON.stringify({
+        success: false,
+        error: `파일 업로드 실패: ${e.message}`
+      }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+    }
+  } else {
+    console.log(`[R2 업로드] ${validFiles.length}개 파일 업로드 시작`);
+    for (let i = 0; i < validFiles.length; i++) {
+      const { file, index } = validFiles[i];
+      try {
+        console.log(`[R2 업로드] ${i + 1}/${validFiles.length} - ${file.name || 'Unknown'} 업로드 중...`);
+        const code = await generateUniqueCode(env);
+        await env.IMAGES.put(code, file.stream(), {
+          httpMetadata: { contentType: file.type },
+          size: file.size
+        });
+        codes.push(code);
+        uploadSuccessFiles.push({
+          index: index,
+          name: file.name || 'Unknown',
+          code: code
+        });
+        console.log(`[R2 업로드] ${i + 1}/${validFiles.length} - 업로드 완료: ${code}`);
+      } catch (e) {
+        console.log(`[R2 업로드 실패] ${index}번째 파일 업로드 오류:`, e);
+        uploadFailedFiles.push({
+          index: index,
+          name: file.name || 'Unknown',
+          error: `업로드 실패: ${e.message}`
+        });
+        
+        // 단일 파일 업로드시에만 즉시 중단
+        if (validFiles.length === 1) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: `파일 업로드 실패: ${e.message}`
+          }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+        }
+      }
+    }
+    console.log(`[R2 업로드] ${uploadSuccessFiles.length}개 파일 업로드 성공, ${uploadFailedFiles.length}개 파일 업로드 실패`);
+  }
+  
+  // 모든 업로드가 실패한 경우
+  if (codes.length === 0) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: '모든 파일 업로드에 실패했습니다.',
+      failedFiles: [...failedFiles, ...uploadFailedFiles]
+    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+
   const host = request.headers.get('host') || 'example.com';
   const finalUrl = codes.length > 0 ? `https://${host}/${codes.join(",")}` : null;
   const rawUrls = codes.map(code => `https://${host}/${code}?raw=1`);
-  console.log(">>> 최종 URL =>", finalUrl);
+  console.log(">>> 업로드 완료 =>", finalUrl);
 
+  // 전체 실패한 파일 목록 (검열 실패 + 업로드 실패)
+  const allFailedFiles = [...failedFiles, ...uploadFailedFiles];
+  
+  // API 응답에 성공/실패 정보 포함
   const responseData = { 
-    success: true, 
+    success: codes.length > 0, 
     url: finalUrl,
     rawUrls: rawUrls,
     codes: codes,
     uploadedFiles: uploadSuccessFiles,
     totalFiles: files.length,
     successCount: uploadSuccessFiles.length,
-    failureCount: uploadFailedFiles.length
+    failureCount: allFailedFiles.length
   };
   
-  if (uploadFailedFiles.length > 0) {
-    responseData.failedFiles = uploadFailedFiles;
-    responseData.message = `${uploadSuccessFiles.length}개 파일 업로드 성공, ${uploadFailedFiles.length}개 파일 실패`;
+  // 실패한 파일이 있으면 추가 정보 포함
+  if (allFailedFiles.length > 0) {
+    responseData.failedFiles = allFailedFiles;
+    responseData.message = `${uploadSuccessFiles.length}개 파일 업로드 성공, ${allFailedFiles.length}개 파일 실패`;
   }
 
   return new Response(JSON.stringify(responseData), {
