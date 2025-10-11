@@ -6,29 +6,23 @@ import { arrayBufferToBase64 } from './utils.js';
 
 /**
  * 파일을 IVCP API를 통해 압축
- * @param {ArrayBuffer} fileBuffer - 압축할 파일 버퍼
- * @param {string} fileName - 파일 이름
- * @param {string} fileType - 파일 MIME 타입
+ * @param {File} file - 압축할 파일
  * @param {string} type - 파일 타입 ('image' 또는 'video')
  * @returns {File} - 압축된 파일
  */
-async function compressFileForCensorship(fileBuffer, fileName, fileType, type) {
+async function compressFileForCensorship(file, type) {
   const IVCP_API_BASE = 'https://ivcp.bloupla.net/api';
   const TARGET_SIZE_KB = 5120; // 5MB in KB
   
   try {
-    console.log(`[IVCP 압축] ${type} 압축 시작 - 원본 크기: ${(fileBuffer.byteLength / (1024 * 1024)).toFixed(2)}MB`);
-    
-    // ArrayBuffer에서 새로운 File 객체 생성
-    const fileBlob = new Blob([fileBuffer], { type: fileType });
-    const fileForUpload = new File([fileBlob], fileName, { type: fileType });
+    console.log(`[IVCP 압축] ${type} 압축 시작 - 원본 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     
     const formData = new FormData();
     if (type === 'image') {
-      formData.append('image', fileForUpload);
+      formData.append('image', file);
       formData.append('targetSizeKB', TARGET_SIZE_KB.toString());
     } else {
-      formData.append('video', fileForUpload);
+      formData.append('video', file);
       formData.append('targetSizeKB', TARGET_SIZE_KB.toString());
       formData.append('compressionMode', 'compress');
     }
@@ -54,9 +48,7 @@ async function compressFileForCensorship(fileBuffer, fileName, fileType, type) {
       // 이미 목표 크기 이하인 경우
       if (result.alreadySmaller) {
         console.log(`[IVCP 압축] 파일이 이미 목표 크기 이하입니다.`);
-        // 원본 버퍼로 새 File 객체 반환
-        const blob = new Blob([fileBuffer], { type: fileType });
-        return new File([blob], fileName, { type: fileType });
+        return file; // 원본 파일 반환
       }
       
       if (!result.success) {
@@ -71,8 +63,8 @@ async function compressFileForCensorship(fileBuffer, fileName, fileType, type) {
         for (let i = 0; i < binaryString.length; i++) {
           bytes[i] = binaryString.charCodeAt(i);
         }
-        const blob = new Blob([bytes], { type: fileType });
-        const compressedFile = new File([blob], fileName, { type: fileType });
+        const blob = new Blob([bytes], { type: file.type });
+        const compressedFile = new File([blob], file.name, { type: file.type });
         console.log(`[IVCP 압축] 압축 완료 (Base64) - 압축 후 크기: ${(compressedFile.size / (1024 * 1024)).toFixed(2)}MB`);
         return compressedFile;
       }
@@ -80,7 +72,7 @@ async function compressFileForCensorship(fileBuffer, fileName, fileType, type) {
     
     // Blob 응답인 경우 (압축된 파일 직접 반환)
     const blob = await response.blob();
-    const compressedFile = new File([blob], fileName, { type: fileType });
+    const compressedFile = new File([blob], file.name, { type: file.type });
     
     console.log(`[IVCP 압축] 압축 완료 (Blob) - 압축 후 크기: ${(compressedFile.size / (1024 * 1024)).toFixed(2)}MB`);
     return compressedFile;
@@ -114,7 +106,7 @@ export async function handleImageCensorship(file, fileBuffer, env) {
     if (file.size > FIVE_MB) {
       console.log(`[이미지 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
-        const compressedFile = await compressFileForCensorship(fileBuffer, file.name, file.type, 'image');
+        const compressedFile = await compressFileForCensorship(file, 'image');
         bufferForCensorship = await compressedFile.arrayBuffer();
         console.log(`[이미지 압축] 압축된 버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB`);
       } catch (compressionError) {
@@ -230,7 +222,7 @@ export async function handleVideoCensorship(file, fileBuffer, env) {
     if (file.size > FIVE_MB) {
       console.log(`[동영상 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
-        const compressedFile = await compressFileForCensorship(fileBuffer, file.name, file.type, 'video');
+        const compressedFile = await compressFileForCensorship(file, 'video');
         bufferForCensorship = await compressedFile.arrayBuffer();
         console.log(`[동영상 압축] 압축된 버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB`);
       } catch (compressionError) {

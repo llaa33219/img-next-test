@@ -126,7 +126,7 @@ async function handlePostUpload(request, env, ctx, url, isApiEndpoint) {
 
       let finalResp;
       try {
-        finalResp = await handleUpload(request, env);
+        finalResp = await handleUpload(request, env, ctx);
         requestsInProgress[cfReqId].resolve(finalResp);
       } catch (err) {
         console.log("handleUpload error:", err);
@@ -140,7 +140,7 @@ async function handlePostUpload(request, env, ctx, url, isApiEndpoint) {
       return isExternalRequest ? addCorsHeaders(finalResp) : finalResp;
     }
   } else {
-    const response = await handleUpload(request, env);
+    const response = await handleUpload(request, env, ctx);
     return isExternalRequest ? addCorsHeaders(response) : response;
   }
 }
