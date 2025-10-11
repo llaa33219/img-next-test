@@ -29,7 +29,7 @@ export async function handleImageCensorship(file, env) {
 
     // 검열 요청 - OpenAI 호환 형식
     const requestBody = {
-      model: 'qwen-vl-max',
+      model: 'qwen3-vl-235b-a22b-instruct',
       messages: [
         {
           role: 'user',
@@ -82,7 +82,7 @@ export async function handleImageCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-        model: 'qwen-vl-max',
+        model: 'qwen3-vl-235b-a22b-instruct',
         messages: [
           {
             role: 'user',
@@ -156,7 +156,7 @@ export async function handleVideoCensorship(file, env) {
 
     // 검열 요청 - OpenAI 호환 형식
     const requestBody = {
-      model: 'qwen-vl-max',
+      model: 'qwen3-vl-235b-a22b-instruct',
       messages: [
         {
           role: 'user',
@@ -209,7 +209,7 @@ export async function handleVideoCensorship(file, env) {
       
       // 보수적 재검토 요청
       const reReviewBody = {
-        model: 'qwen-vl-max',
+        model: 'qwen3-vl-235b-a22b-instruct',
         messages: [
           {
             role: 'user',
