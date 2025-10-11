@@ -65,12 +65,9 @@ async function compressFileForCensorship(file, type) {
       // Base64 형식인 경우 (returnBase64=true 요청 시)
       if (result.compressedFile) {
         console.log(`[IVCP 압축] Base64 데이터 수신 - 길이: ${result.compressedFile.length} 문자`);
-        // data:image/jpeg;base64,... 형태에서 base64 부분만 추출
-        const base64Data = result.compressedFile.includes(',') 
-          ? result.compressedFile.split(',')[1] 
-          : result.compressedFile;
-        console.log(`[IVCP 압축] 압축 완료 (Base64) - Base64 순수 데이터 길이: ${base64Data.length} 문자`);
-        return { base64Data, originalFile: file };
+        // 압축 API가 반환한 전체 data URL을 그대로 사용 (data:image/jpeg;base64,... 형태)
+        console.log(`[IVCP 압축] 압축 완료 - 전체 data URL 반환`);
+        return { dataUrl: result.compressedFile, originalFile: file };
       }
       
       throw new Error('압축 결과에 compressedFile이 없습니다.');
@@ -103,18 +100,18 @@ export async function handleImageCensorship(file, env) {
 
     // 5MB 이상인 경우 압축
     const FIVE_MB = 5 * 1024 * 1024;
-    let base64Image = null;
+    let imageDataUrl = null; // 전체 data URL (data:image/jpeg;base64,...)
     let fileForCensorship = file;
     
     if (file.size > FIVE_MB) {
       console.log(`[이미지 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
         const compressionResult = await compressFileForCensorship(file, 'image');
-        if (compressionResult.base64Data) {
-          // 압축 API가 반환한 base64 데이터를 직접 사용
-          base64Image = compressionResult.base64Data;
+        if (compressionResult.dataUrl) {
+          // 압축 API가 반환한 전체 data URL을 직접 사용
+          imageDataUrl = compressionResult.dataUrl;
           fileForCensorship = compressionResult.originalFile;
-          console.log(`[이미지 인코딩] 압축 API에서 Base64 직접 수신 - 길이: ${base64Image.length} 문자`);
+          console.log(`[이미지 인코딩] 압축 API에서 data URL 직접 수신 - 길이: ${imageDataUrl.length} 문자`);
         } else {
           // 파일이 이미 5MB 이하인 경우 원본 사용
           fileForCensorship = compressionResult.originalFile;
@@ -126,12 +123,13 @@ export async function handleImageCensorship(file, env) {
       }
     }
 
-    // base64Image가 없으면 (압축하지 않았거나 압축 실패한 경우) 변환 필요
-    if (!base64Image) {
+    // imageDataUrl이 없으면 (압축하지 않았거나 압축 실패한 경우) 변환 필요
+    if (!imageDataUrl) {
       console.log(`[이미지 인코딩] Base64 변환 시작`);
       const buffer = await fileForCensorship.arrayBuffer();
-      base64Image = arrayBufferToBase64(buffer);
-      console.log(`[이미지 인코딩] 완료 - Base64 길이: ${base64Image.length} 문자`);
+      const base64Image = arrayBufferToBase64(buffer);
+      imageDataUrl = `data:${fileForCensorship.type};base64,${base64Image}`;
+      console.log(`[이미지 인코딩] 완료 - data URL 생성, 길이: ${imageDataUrl.length} 문자`);
     }
 
     // 검열 요청 - OpenAI 호환 형식
@@ -165,7 +163,7 @@ export async function handleImageCensorship(file, env) {
             {
               type: 'image_url',
               image_url: {
-                url: `data:${fileForCensorship.type};base64,${base64Image}`
+                url: imageDataUrl
               }
             }
           ]
@@ -231,18 +229,18 @@ export async function handleVideoCensorship(file, env) {
 
     // 5MB 이상인 경우 압축
     const FIVE_MB = 5 * 1024 * 1024;
-    let base64Video = null;
+    let videoDataUrl = null; // 전체 data URL (data:video/mp4;base64,...)
     let fileForCensorship = file;
     
     if (file.size > FIVE_MB) {
       console.log(`[동영상 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
         const compressionResult = await compressFileForCensorship(file, 'video');
-        if (compressionResult.base64Data) {
-          // 압축 API가 반환한 base64 데이터를 직접 사용
-          base64Video = compressionResult.base64Data;
+        if (compressionResult.dataUrl) {
+          // 압축 API가 반환한 전체 data URL을 직접 사용
+          videoDataUrl = compressionResult.dataUrl;
           fileForCensorship = compressionResult.originalFile;
-          console.log(`[동영상 인코딩] 압축 API에서 Base64 직접 수신 - 길이: ${base64Video.length} 문자`);
+          console.log(`[동영상 인코딩] 압축 API에서 data URL 직접 수신 - 길이: ${videoDataUrl.length} 문자`);
         } else {
           // 파일이 이미 5MB 이하인 경우 원본 사용
           fileForCensorship = compressionResult.originalFile;
@@ -254,12 +252,13 @@ export async function handleVideoCensorship(file, env) {
       }
     }
 
-    // base64Video가 없으면 (압축하지 않았거나 압축 실패한 경우) 변환 필요
-    if (!base64Video) {
+    // videoDataUrl이 없으면 (압축하지 않았거나 압축 실패한 경우) 변환 필요
+    if (!videoDataUrl) {
       console.log(`[동영상 인코딩] Base64 변환 시작`);
       const buffer = await fileForCensorship.arrayBuffer();
-      base64Video = arrayBufferToBase64(buffer);
-      console.log(`[동영상 인코딩] 완료 - Base64 길이: ${base64Video.length} 문자`);
+      const base64Video = arrayBufferToBase64(buffer);
+      videoDataUrl = `data:${fileForCensorship.type};base64,${base64Video}`;
+      console.log(`[동영상 인코딩] 완료 - data URL 생성, 길이: ${videoDataUrl.length} 문자`);
     }
 
     // 검열 요청 - OpenAI 호환 형식
@@ -294,7 +293,7 @@ export async function handleVideoCensorship(file, env) {
             {
               type: 'video_url',
               video_url: {
-                url: `data:${fileForCensorship.type};base64,${base64Video}`
+                url: videoDataUrl
               }
             }
           ]
