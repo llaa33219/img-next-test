@@ -107,8 +107,9 @@ export async function handleImageCensorship(file, env) {
       try {
         fileForCensorship = await compressFileForCensorship(file, 'image');
       } catch (compressionError) {
-        console.log(`[이미지 압축] 압축 실패, 원본으로 계속 진행: ${compressionError.message}`);
-        // 압축 실패 시 원본으로 계속 진행
+        console.log(`[이미지 압축] 압축 실패: ${compressionError.message}`);
+        // 압축 실패 시, 원본으로 진행하는 대신 오류 발생
+        throw new Error(`5MB 이상의 파일 압축에 실패했습니다. 파일이 너무 크거나 압축 서비스에 문제가 있을 수 있습니다.`);
       }
     }
 
@@ -221,8 +222,9 @@ export async function handleVideoCensorship(file, env) {
       try {
         fileForCensorship = await compressFileForCensorship(file, 'video');
       } catch (compressionError) {
-        console.log(`[동영상 압축] 압축 실패, 원본으로 계속 진행: ${compressionError.message}`);
-        // 압축 실패 시 원본으로 계속 진행
+        console.log(`[동영상 압축] 압축 실패: ${compressionError.message}`);
+        // 압축 실패 시, 원본으로 진행하는 대신 오류 발생
+        throw new Error(`5MB 이상의 파일 압축에 실패했습니다. 파일이 너무 크거나 압축 서비스에 문제가 있을 수 있습니다.`);
       }
     }
 
