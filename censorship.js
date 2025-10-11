@@ -218,12 +218,13 @@ async function callQwenAPI(apiKey, requestBody) {
     try {
       const apiUrl = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions';
       console.log(`[Qwen API 호출] 시도 ${retryCount + 1}/${maxRetries}`);
+      console.log(`[Qwen API 호출] API 키: ${apiKey.substring(0, 10)}...${apiKey.substring(apiKey.length - 4)}`);
       
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey.substring(0, 10)}...`
+          'Authorization': `Bearer ${apiKey}`
         },
         body: JSON.stringify(requestBody)
       });
