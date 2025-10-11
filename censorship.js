@@ -8,7 +8,7 @@ import { arrayBufferToBase64 } from './utils.js';
  * 파일을 IVCP API를 통해 압축
  * @param {File} file - 압축할 파일
  * @param {string} type - 파일 타입 ('image' 또는 'video')
- * @returns {Object} - { buffer: ArrayBuffer, size: number } 압축된 버퍼와 크기
+ * @returns {File} - 압축된 파일
  */
 async function compressFileForCensorship(file, type) {
   const IVCP_API_BASE = 'https://ivcp.bloupla.net/api';
@@ -48,7 +48,7 @@ async function compressFileForCensorship(file, type) {
       // 이미 목표 크기 이하인 경우
       if (result.alreadySmaller) {
         console.log(`[IVCP 압축] 파일이 이미 목표 크기 이하입니다.`);
-        return null; // null 반환 = 압축 불필요
+        return file; // 원본 파일 반환
       }
       
       if (!result.success) {
@@ -63,18 +63,19 @@ async function compressFileForCensorship(file, type) {
         for (let i = 0; i < binaryString.length; i++) {
           bytes[i] = binaryString.charCodeAt(i);
         }
-        const buffer = bytes.buffer;
-        console.log(`[IVCP 압축] 압축 완료 (Base64) - 압축 후 크기: ${(buffer.byteLength / (1024 * 1024)).toFixed(2)}MB`);
-        return { buffer, size: buffer.byteLength };
+        const blob = new Blob([bytes], { type: file.type });
+        const compressedFile = new File([blob], file.name, { type: file.type });
+        console.log(`[IVCP 압축] 압축 완료 (Base64) - 압축 후 크기: ${(compressedFile.size / (1024 * 1024)).toFixed(2)}MB`);
+        return compressedFile;
       }
     }
     
     // Blob 응답인 경우 (압축된 파일 직접 반환)
     const blob = await response.blob();
-    const buffer = await blob.arrayBuffer();
+    const compressedFile = new File([blob], file.name, { type: file.type });
     
-    console.log(`[IVCP 압축] 압축 완료 (Blob) - 압축 후 크기: ${(buffer.byteLength / (1024 * 1024)).toFixed(2)}MB`);
-    return { buffer, size: buffer.byteLength };
+    console.log(`[IVCP 압축] 압축 완료 (Blob) - 압축 후 크기: ${(compressedFile.size / (1024 * 1024)).toFixed(2)}MB`);
+    return compressedFile;
   } catch (error) {
     console.log(`[IVCP 압축] 압축 실패: ${error.message}`);
     throw error;
@@ -84,11 +85,11 @@ async function compressFileForCensorship(file, type) {
 /**
  * 이미지 검열 - base64 인코딩 사용
  * @param {File} file - 검열할 이미지 파일
- * @param {Object} env - 환경 변수
  * @param {ArrayBuffer} fileBuffer - 미리 읽은 파일 버퍼 (성능 최적화)
+ * @param {Object} env - 환경 변수
  * @returns {Object} - 검열 결과
  */
-export async function handleImageCensorship(file, env, fileBuffer) {
+export async function handleImageCensorship(file, fileBuffer, env) {
   try {
     console.log(`이미지 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     const dashscopeApiKey = env.DASHSCOPE_API_KEY;
@@ -105,14 +106,9 @@ export async function handleImageCensorship(file, env, fileBuffer) {
     if (file.size > FIVE_MB) {
       console.log(`[이미지 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
-        const compressedResult = await compressFileForCensorship(file, 'image');
-        // 압축 결과가 있으면 사용, null이면 원본 사용
-        if (compressedResult) {
-          bufferForCensorship = compressedResult.buffer;
-          console.log(`[이미지 압축] 압축된 버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB`);
-        } else {
-          console.log(`[이미지 압축] 이미 5MB 이하 - 원본 버퍼 사용`);
-        }
+        const compressedFile = await compressFileForCensorship(file, 'image');
+        bufferForCensorship = await compressedFile.arrayBuffer();
+        console.log(`[이미지 압축] 압축된 버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB`);
       } catch (compressionError) {
         console.log(`[이미지 압축] 압축 실패, 원본 버퍼로 계속 진행: ${compressionError.message}`);
         // 압축 실패 시 원본 버퍼로 계속 진행
@@ -205,11 +201,11 @@ export async function handleImageCensorship(file, env, fileBuffer) {
 /**
  * 동영상 검열 - base64 인코딩 사용
  * @param {File} file - 검열할 동영상 파일
- * @param {Object} env - 환경 변수
  * @param {ArrayBuffer} fileBuffer - 미리 읽은 파일 버퍼 (성능 최적화)
+ * @param {Object} env - 환경 변수
  * @returns {Object} - 검열 결과
  */
-export async function handleVideoCensorship(file, env, fileBuffer) {
+export async function handleVideoCensorship(file, fileBuffer, env) {
   try {
     console.log(`비디오 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
     const dashscopeApiKey = env.DASHSCOPE_API_KEY;
@@ -226,14 +222,9 @@ export async function handleVideoCensorship(file, env, fileBuffer) {
     if (file.size > FIVE_MB) {
       console.log(`[동영상 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
-        const compressedResult = await compressFileForCensorship(file, 'video');
-        // 압축 결과가 있으면 사용, null이면 원본 사용
-        if (compressedResult) {
-          bufferForCensorship = compressedResult.buffer;
-          console.log(`[동영상 압축] 압축된 버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB`);
-        } else {
-          console.log(`[동영상 압축] 이미 5MB 이하 - 원본 버퍼 사용`);
-        }
+        const compressedFile = await compressFileForCensorship(file, 'video');
+        bufferForCensorship = await compressedFile.arrayBuffer();
+        console.log(`[동영상 압축] 압축된 버퍼 크기: ${(bufferForCensorship.byteLength / 1024 / 1024).toFixed(2)}MB`);
       } catch (compressionError) {
         console.log(`[동영상 압축] 압축 실패, 원본 버퍼로 계속 진행: ${compressionError.message}`);
         // 압축 실패 시 원본 버퍼로 계속 진행

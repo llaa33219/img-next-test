@@ -44,7 +44,7 @@ export async function handleUpload(request, env) {
     }
   }
 
-  // 1) 검열 - 다중 업로드시 실패한 파일 수집, 단일 업로드시 즉시 중단
+  // 1) 파일 버퍼 미리 읽기 및 검열 - 다중 업로드시 실패한 파일 수집, 단일 업로드시 즉시 중단
   console.log(`[검열 시작] ${files.length}개 파일 검열 시작`);
   const validFiles = [];
   const failedFiles = [];
@@ -54,14 +54,14 @@ export async function handleUpload(request, env) {
     console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.name || 'Unknown'}, ${file.type}, ${(file.size / 1024 / 1024).toFixed(2)}MB`);
     
     try {
-      // 파일을 한 번만 읽어서 캐시 (성능 최적화)
+      // 파일 버퍼를 한 번만 읽기 (검열과 R2 업로드에서 재사용)
       console.log(`[파일 읽기] ${i + 1}번째 파일 버퍼 읽기 시작`);
       const fileBuffer = await file.arrayBuffer();
-      console.log(`[파일 읽기] ${i + 1}번째 파일 버퍼 읽기 완료: ${(fileBuffer.byteLength / 1024 / 1024).toFixed(2)}MB`);
+      console.log(`[파일 읽기] ${i + 1}번째 파일 버퍼 읽기 완료 - ${(fileBuffer.byteLength / 1024 / 1024).toFixed(2)}MB`);
       
       const r = file.type.startsWith('image/')
-        ? await handleImageCensorship(file, env, fileBuffer)
-        : await handleVideoCensorship(file, env, fileBuffer);
+        ? await handleImageCensorship(file, fileBuffer, env)
+        : await handleVideoCensorship(file, fileBuffer, env);
         
       if (!r.ok) {
         console.log(`[검열 실패] ${i + 1}번째 파일에서 검열 실패`);
@@ -91,8 +91,7 @@ export async function handleUpload(request, env) {
         }
       } else {
         console.log(`[검열 통과] ${i + 1}번째 파일 검열 통과`);
-        // fileBuffer를 함께 저장하여 재사용
-        validFiles.push({ file, index: i + 1, buffer: fileBuffer });
+        validFiles.push({ file, fileBuffer, index: i + 1 });
       }
     } catch (e) {
       console.log(`[검열 오류] ${i + 1}번째 파일 검열 중 오류:`, e);
@@ -124,7 +123,7 @@ export async function handleUpload(request, env) {
     }), { status: 400, headers: { 'Content-Type': 'application/json' } });
   }
 
-  // 2) R2 업로드 - 검열 통과한 파일들만 업로드
+  // 2) R2 업로드 - 검열 통과한 파일들만 업로드 (미리 읽은 버퍼 사용)
   let codes = [];
   const uploadSuccessFiles = [];
   const uploadFailedFiles = [];
@@ -139,10 +138,8 @@ export async function handleUpload(request, env) {
         }), { status: 400, headers: { 'Content-Type': 'application/json' } });
       }
       console.log(`[R2 업로드] 커스텀 이름으로 업로드 시작: ${customName}`);
-      // 캐시된 버퍼 재사용 (arrayBuffer를 다시 읽지 않음)
-      const buffer = validFiles[0].buffer;
-      console.log(`[R2 업로드] 캐시된 버퍼 사용: ${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB`);
-      await env.IMAGES.put(customName, buffer, {
+      // 이미 읽은 버퍼 재사용
+      await env.IMAGES.put(customName, validFiles[0].fileBuffer, {
         httpMetadata: { contentType: validFiles[0].file.type }
       });
       codes.push(customName);
@@ -162,13 +159,12 @@ export async function handleUpload(request, env) {
   } else {
     console.log(`[R2 업로드] ${validFiles.length}개 파일 업로드 시작`);
     for (let i = 0; i < validFiles.length; i++) {
-      const { file, index, buffer } = validFiles[i];
+      const { file, fileBuffer, index } = validFiles[i];
       try {
         console.log(`[R2 업로드] ${i + 1}/${validFiles.length} - ${file.name || 'Unknown'} 업로드 중...`);
         const code = await generateUniqueCode(env);
-        // 캐시된 버퍼 재사용 (arrayBuffer를 다시 읽지 않음)
-        console.log(`[R2 업로드] 캐시된 버퍼 사용: ${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB`);
-        await env.IMAGES.put(code, buffer, {
+        // 이미 읽은 버퍼 재사용 (파일을 다시 읽지 않음)
+        await env.IMAGES.put(code, fileBuffer, {
           httpMetadata: { contentType: file.type }
         });
         codes.push(code);
