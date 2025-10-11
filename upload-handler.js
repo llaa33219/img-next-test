@@ -54,9 +54,14 @@ export async function handleUpload(request, env) {
     console.log(`[검열 진행] ${i + 1}/${files.length} - ${file.name || 'Unknown'}, ${file.type}, ${(file.size / 1024 / 1024).toFixed(2)}MB`);
     
     try {
+      // 파일을 한 번만 읽어서 캐시 (성능 최적화)
+      console.log(`[파일 읽기] ${i + 1}번째 파일 버퍼 읽기 시작`);
+      const fileBuffer = await file.arrayBuffer();
+      console.log(`[파일 읽기] ${i + 1}번째 파일 버퍼 읽기 완료: ${(fileBuffer.byteLength / 1024 / 1024).toFixed(2)}MB`);
+      
       const r = file.type.startsWith('image/')
-        ? await handleImageCensorship(file, env)
-        : await handleVideoCensorship(file, env);
+        ? await handleImageCensorship(file, env, fileBuffer)
+        : await handleVideoCensorship(file, env, fileBuffer);
         
       if (!r.ok) {
         console.log(`[검열 실패] ${i + 1}번째 파일에서 검열 실패`);
@@ -86,7 +91,8 @@ export async function handleUpload(request, env) {
         }
       } else {
         console.log(`[검열 통과] ${i + 1}번째 파일 검열 통과`);
-        validFiles.push({ file, index: i + 1 });
+        // fileBuffer를 함께 저장하여 재사용
+        validFiles.push({ file, index: i + 1, buffer: fileBuffer });
       }
     } catch (e) {
       console.log(`[검열 오류] ${i + 1}번째 파일 검열 중 오류:`, e);
@@ -133,7 +139,9 @@ export async function handleUpload(request, env) {
         }), { status: 400, headers: { 'Content-Type': 'application/json' } });
       }
       console.log(`[R2 업로드] 커스텀 이름으로 업로드 시작: ${customName}`);
-      const buffer = await validFiles[0].file.arrayBuffer();
+      // 캐시된 버퍼 재사용 (arrayBuffer를 다시 읽지 않음)
+      const buffer = validFiles[0].buffer;
+      console.log(`[R2 업로드] 캐시된 버퍼 사용: ${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB`);
       await env.IMAGES.put(customName, buffer, {
         httpMetadata: { contentType: validFiles[0].file.type }
       });
@@ -154,11 +162,12 @@ export async function handleUpload(request, env) {
   } else {
     console.log(`[R2 업로드] ${validFiles.length}개 파일 업로드 시작`);
     for (let i = 0; i < validFiles.length; i++) {
-      const { file, index } = validFiles[i];
+      const { file, index, buffer } = validFiles[i];
       try {
         console.log(`[R2 업로드] ${i + 1}/${validFiles.length} - ${file.name || 'Unknown'} 업로드 중...`);
         const code = await generateUniqueCode(env);
-        const buffer = await file.arrayBuffer();
+        // 캐시된 버퍼 재사용 (arrayBuffer를 다시 읽지 않음)
+        console.log(`[R2 업로드] 캐시된 버퍼 사용: ${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB`);
         await env.IMAGES.put(code, buffer, {
           httpMetadata: { contentType: file.type }
         });
