@@ -8,7 +8,7 @@ import { arrayBufferToBase64 } from './utils.js';
  * 파일을 IVCP API를 통해 압축
  * @param {File} file - 압축할 파일
  * @param {string} type - 파일 타입 ('image' 또는 'video')
- * @returns {File} - 압축된 파일
+ * @returns {{file: File, base64: string|null}} - 압축된 파일과 Base64 인코딩된 문자열 (해당하는 경우)
  */
 async function compressFileForCensorship(file, type) {
   const IVCP_API_BASE = 'https://ivcp.bloupla.net/api';
@@ -26,6 +26,8 @@ async function compressFileForCensorship(file, type) {
       formData.append('targetSizeKB', TARGET_SIZE_KB.toString());
       formData.append('compressionMode', 'compress');
     }
+    // Base64로 직접 반환하도록 요청
+    formData.append('returnBase64', 'true');
     
     const endpoint = type === 'image' ? '/compress-image' : '/compress-video';
     const response = await fetch(`${IVCP_API_BASE}${endpoint}`, {
@@ -41,14 +43,14 @@ async function compressFileForCensorship(file, type) {
     
     const contentType = response.headers.get('content-type');
     
-    // JSON 응답인 경우 (에러 또는 메타데이터)
+    // IVCP API는 returnBase64=true일 때 항상 JSON을 반환해야 함
     if (contentType && contentType.includes('application/json')) {
       const result = await response.json();
       
       // 이미 목표 크기 이하인 경우
       if (result.alreadySmaller) {
         console.log(`[IVCP 압축] 파일이 이미 목표 크기 이하입니다.`);
-        return file; // 원본 파일 반환
+        return { file: file, base64: null }; // 원본 파일과 null base64 반환
       }
       
       if (!result.success) {
@@ -57,25 +59,20 @@ async function compressFileForCensorship(file, type) {
       
       // Base64 형식인 경우
       if (result.compressedFile) {
+        console.log(`[IVCP 압축] 압축 완료 (Base64)`);
+        // "data:image/jpeg;base64," 접두사 제거
         const base64Data = result.compressedFile.split(',')[1] || result.compressedFile;
-        const binaryString = atob(base64Data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        const blob = new Blob([bytes], { type: file.type });
-        const compressedFile = new File([blob], file.name, { type: file.type });
-        console.log(`[IVCP 압축] 압축 완료 (Base64) - 압축 후 크기: ${(compressedFile.size / (1024 * 1024)).toFixed(2)}MB`);
-        return compressedFile;
+        // 압축된 파일 객체는 생성하지 않고 base64 데이터만 반환
+        return { file: null, base64: base64Data };
       }
+
+      // 성공했지만 compressedFile 필드가 없는 예외적인 경우
+      throw new Error('압축 API가 Base64 데이터를 반환하지 않았습니다.');
     }
     
-    // Blob 응답인 경우 (압축된 파일 직접 반환)
-    const blob = await response.blob();
-    const compressedFile = new File([blob], file.name, { type: file.type });
-    
-    console.log(`[IVCP 압축] 압축 완료 (Blob) - 압축 후 크기: ${(compressedFile.size / (1024 * 1024)).toFixed(2)}MB`);
-    return compressedFile;
+    // JSON이 아닌 응답은 오류로 처리 (e.g. Blob)
+    console.log(`[IVCP 압축] 예기치 않은 응답 형식: ${contentType}`);
+    throw new Error('압축 서비스에서 예기치 않은 응답 형식을 받았습니다.');
   } catch (error) {
     console.log(`[IVCP 압축] 압축 실패: ${error.message}`);
     throw error;
@@ -102,22 +99,35 @@ export async function handleImageCensorship(file, env) {
     // 5MB 이상인 경우 압축
     const FIVE_MB = 5 * 1024 * 1024;
     let fileForCensorship = file;
+    let base64Image = null;
+
     if (file.size > FIVE_MB) {
       console.log(`[이미지 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
-        fileForCensorship = await compressFileForCensorship(file, 'image');
+        const compressionResult = await compressFileForCensorship(file, 'image');
+        if (compressionResult.base64) {
+          base64Image = compressionResult.base64;
+          // base64를 받았으므로 fileForCensorship은 더 이상 원본 파일이 아님을 명시
+          // 타입 정보는 원본 파일의 것을 사용
+          fileForCensorship = { type: file.type, size: base64Image.length }; 
+        } else {
+          fileForCensorship = compressionResult.file;
+        }
       } catch (compressionError) {
-        console.log(`[이미지 압축] 압축 실패: ${compressionError.message}`);
-        // 압축 실패 시, 원본으로 진행하는 대신 오류 발생
-        throw new Error(`5MB 이상의 파일 압축에 실패했습니다. 파일이 너무 크거나 압축 서비스에 문제가 있을 수 있습니다.`);
+        console.log(`[이미지 압축] 압축 실패, 원본으로 계속 진행: ${compressionError.message}`);
+        // 압축 실패 시 원본으로 계속 진행
       }
     }
 
-    // 이미지를 base64로 인코딩
-    console.log(`[이미지 인코딩] Base64 변환 시작`);
-    const buffer = await fileForCensorship.arrayBuffer();
-    const base64Image = arrayBufferToBase64(buffer);
-    console.log(`[이미지 인코딩] 완료 - Base64 길이: ${base64Image.length} 문자`);
+    // Base64 변환이 필요한 경우에만 실행
+    if (!base64Image) {
+      console.log(`[이미지 인코딩] Base64 변환 시작`);
+      const buffer = await fileForCensorship.arrayBuffer();
+      base64Image = arrayBufferToBase64(buffer);
+      console.log(`[이미지 인코딩] 완료 - Base64 길이: ${base64Image.length} 문자`);
+    } else {
+      console.log(`[이미지 인코딩] 압축 서비스에서 받은 Base64 사용 - 길이: ${base64Image.length} 문자`);
+    }
 
     // 검열 요청 - OpenAI 호환 형식
     const requestBody = {
@@ -217,22 +227,33 @@ export async function handleVideoCensorship(file, env) {
     // 5MB 이상인 경우 압축
     const FIVE_MB = 5 * 1024 * 1024;
     let fileForCensorship = file;
+    let base64Video = null;
+
     if (file.size > FIVE_MB) {
       console.log(`[동영상 압축] 파일 크기가 5MB를 초과하여 압축 진행`);
       try {
-        fileForCensorship = await compressFileForCensorship(file, 'video');
+        const compressionResult = await compressFileForCensorship(file, 'video');
+        if (compressionResult.base64) {
+          base64Video = compressionResult.base64;
+          fileForCensorship = { type: file.type, size: base64Video.length };
+        } else {
+          fileForCensorship = compressionResult.file;
+        }
       } catch (compressionError) {
-        console.log(`[동영상 압축] 압축 실패: ${compressionError.message}`);
-        // 압축 실패 시, 원본으로 진행하는 대신 오류 발생
-        throw new Error(`5MB 이상의 파일 압축에 실패했습니다. 파일이 너무 크거나 압축 서비스에 문제가 있을 수 있습니다.`);
+        console.log(`[동영상 압축] 압축 실패, 원본으로 계속 진행: ${compressionError.message}`);
+        // 압축 실패 시 원본으로 계속 진행
       }
     }
 
     // 비디오를 base64로 인코딩
-    console.log(`[동영상 인코딩] Base64 변환 시작`);
-    const buffer = await fileForCensorship.arrayBuffer();
-    const base64Video = arrayBufferToBase64(buffer);
-    console.log(`[동영상 인코딩] 완료 - Base64 길이: ${base64Video.length} 문자`);
+    if (!base64Video) {
+      console.log(`[동영상 인코딩] Base64 변환 시작`);
+      const buffer = await fileForCensorship.arrayBuffer();
+      base64Video = arrayBufferToBase64(buffer);
+      console.log(`[동영상 인코딩] 완료 - Base64 길이: ${base64Video.length} 문자`);
+    } else {
+        console.log(`[동영상 인코딩] 압축 서비스에서 받은 Base64 사용 - 길이: ${base64Video.length} 문자`);
+    }
 
     // 검열 요청 - OpenAI 호환 형식
     const requestBody = {
