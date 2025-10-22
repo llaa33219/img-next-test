@@ -180,7 +180,7 @@ async function handleGetRequest(request, env, url) {
     let mediaTags = "";
     for (const { code, object } of objects) {
       if (object && object.httpMetadata?.contentType?.startsWith('video/')) {
-        mediaTags += `<video src="https://${url.host}/${code}?raw=1"></video>\n`;
+        mediaTags += `<video src="https://${url.host}/${code}?raw=1" controls preload="auto"></video>\n`;
       } else {
         mediaTags += `<img src="https://${url.host}/${code}?raw=1" alt="Uploaded Media">\n`;
       }
@@ -208,7 +208,7 @@ async function handleGetRequest(request, env, url) {
     else {
       let mediaTag = "";
       if (object.httpMetadata?.contentType?.startsWith('video/')) {
-        mediaTag = `<video src="https://${url.host}/${key}?raw=1"></video>\n`;
+        mediaTag = `<video src="https://${url.host}/${key}?raw=1" controls preload="auto"></video>\n`;
       } else {
         mediaTag = `<img src="https://${url.host}/${key}?raw=1" alt="Uploaded Media">\n`;
       }
