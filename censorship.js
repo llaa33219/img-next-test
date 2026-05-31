@@ -133,7 +133,7 @@ export async function handleImageCensorship(file, env) {
 
     // 검열 요청 - OpenAI 호환 형식
     const requestBody = {
-      model: 'qwen3.5-397b-a17b',
+      model: 'qwen3.6-plus',
       messages: [
         {
           role: 'user',
@@ -265,7 +265,7 @@ export async function handleVideoCensorship(file, env) {
 
     // 검열 요청 - OpenAI 호환 형식
     const requestBody = {
-      model: 'qwen3.5-397b-a17b',
+      model: 'qwen3.6-plus',
       messages: [
         {
           role: 'user',
