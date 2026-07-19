@@ -337,6 +337,24 @@ export async function handleVideoCensorship(file, env) {
 }
 
 /**
+ * 응답 텍스트에서 <think>...</think> 블록 제거
+ * (MiniMax 등 추론 모델이 사고 과정을 <think> 태그로 감싸 반환하는 경우 실제 답변만 추출)
+ * @param {string} text - 원본 응답 텍스트
+ * @returns {string} - think 블록이 제거된 텍스트
+ */
+function stripThinkBlocks(text) {
+  if (!text) return text;
+  // 닫힌 <think>...</think> 블록 모두 제거 (대소문자 무관, 여러 줄 포함)
+  let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  // 닫히지 않은 <think> 태그가 남아 있으면(응답이 잘린 경우) 그 지점부터 끝까지 제거
+  const openIdx = cleaned.search(/<think>/i);
+  if (openIdx !== -1) {
+    cleaned = cleaned.slice(0, openIdx);
+  }
+  return cleaned.trim();
+}
+
+/**
  * Qwen API 호출 함수
  * @param {string} apiKey - API 키
  * @param {Object} requestBody - 요청 본문
@@ -391,7 +409,12 @@ async function callQwenAPI(apiKey, requestBody) {
         return { success: false, error: 'Qwen API에서 유효한 응답을 받지 못했습니다. API 키 또는 요청 형식을 확인해주세요.' };
       }
 
-      const responseText = choice.message.content;
+      // <think>...</think> 추론 블록을 제거하고 실제 답변만 사용
+      const rawText = choice.message.content;
+      const responseText = stripThinkBlocks(rawText);
+      if (rawText.length !== responseText.length) {
+        console.log(`[Qwen API] <think> 블록 제거됨: ${rawText.length}자 → ${responseText.length}자`);
+      }
 
       if (!responseText) {
         console.log('[Qwen API 응답 파싱 실패] 빈 응답');
@@ -491,4 +514,3 @@ function isInappropriateContent(responseText) {
     reasons: flagged
   };
 }
-
