@@ -167,8 +167,7 @@ export async function handleImageCensorship(file, env) {
             }
           ]
         }
-      ],
-      "enable_thinking": true
+      ]
     };
 
     console.log(`[이미지 검열 API 요청] URL: https://api.minimax.io/v1/chat/completions`);
@@ -299,8 +298,7 @@ export async function handleVideoCensorship(file, env) {
             }
           ]
         }
-      ],
-      "enable_thinking": true
+      ]
     };
     
     console.log(`[동영상 검열 API 요청] URL: https://api.minimax.io/v1/chat/completions`);
