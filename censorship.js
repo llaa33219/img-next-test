@@ -125,7 +125,7 @@ async function runOcrWithWorkersAi(env, base64Image, mimeType) {
 export async function handleImageCensorship(file, env) {
   try {
     console.log(`이미지 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
-    // 이미지 검열은 Workers AI(qwen3.8-27b) 사용 - AI 바인딩 필수
+    // 이미지 검열은 Workers AI(gemma-4-26b-a4b-it) 사용 - AI 바인딩 필수
     if (!env.AI) {
       return { ok: false, response: new Response(JSON.stringify({
           success: false, error: 'Workers AI 바인딩(AI)이 설정되지 않았습니다.'
@@ -179,7 +179,7 @@ export async function handleImageCensorship(file, env) {
         "Also still examine the image itself carefully, because OCR may have missed or misread some text.\n\n"
       : "";
 
-    // 검열 요청 - OpenAI 호환 메시지 형식 (Workers AI qwen3.8-27b)
+    // 검열 요청 - OpenAI 호환 메시지 형식 (Workers AI gemma-4-26b-a4b-it)
     const messages = [
       {
         role: 'user',
@@ -216,7 +216,7 @@ export async function handleImageCensorship(file, env) {
       }
     ];
 
-    console.log(`[이미지 검열 API 요청] Workers AI 모델: @cf/qwen/qwen3.8-27b`);
+    console.log(`[이미지 검열 API 요청] Workers AI 모델: @cf/google/gemma-4-26b-a4b-it`);
     console.log(`[이미지 검열 API 요청] 이미지 타입: ${mimeType}`);
     console.log(`[이미지 검열 API 요청] Base64 이미지 URL 길이: ${messages[0].content[1].image_url.url.length} 문자`);
 
@@ -442,7 +442,7 @@ function stripThinkBlocks(text) {
 }
 
 /**
- * Workers AI 비전 모델(qwen3.8-27b) 호출 함수
+ * Workers AI 비전 모델(gemma-4-26b-a4b-it) 호출 함수
  * callQwenAPI와 동일한 반환 형태를 유지해 파싱/fail-closed 로직을 그대로 재사용한다.
  * (inputSensitive/outputSensitive는 MiniMax 전용 필드라 항상 false)
  * @param {Object} env - 환경 변수 (Workers AI 바인딩 env.AI)
@@ -456,7 +456,7 @@ async function callWorkersAiVision(env, messages, maxTokens) {
   while (retryCount < maxRetries) {
     try {
       console.log(`[Workers AI 검열 호출] 시도 ${retryCount + 1}/${maxRetries}`);
-      const data = await env.AI.run('@cf/qwen/qwen3.8-27b', {
+      const data = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
         messages,
         max_completion_tokens: maxTokens
       });
