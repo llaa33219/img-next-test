@@ -125,10 +125,10 @@ async function runOcrWithWorkersAi(env, base64Image, mimeType) {
 export async function handleImageCensorship(file, env) {
   try {
     console.log(`이미지 크기: ${(file.size / (1024 * 1024)).toFixed(2)}MB`);
-    const dashscopeApiKey = env.DASHSCOPE_API_KEY;
-    if (!dashscopeApiKey) {
+    // 이미지 검열은 Workers AI(qwen3.8-27b) 사용 - AI 바인딩 필수
+    if (!env.AI) {
       return { ok: false, response: new Response(JSON.stringify({
-          success: false, error: 'DashScope API 키가 설정되지 않았습니다.'
+          success: false, error: 'Workers AI 바인딩(AI)이 설정되지 않았습니다.'
         }), { status: 500, headers: { 'Content-Type': 'application/json' } })
       };
     }
@@ -179,55 +179,48 @@ export async function handleImageCensorship(file, env) {
         "Also still examine the image itself carefully, because OCR may have missed or misread some text.\n\n"
       : "";
 
-    // 검열 요청 - OpenAI 호환 형식
-    const requestBody = {
-      model: 'MiniMax-M3',
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text:
-                "Analyze this image for inappropriate content. Be extremely strict and thorough. " +
-                "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
-                "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings.\n\n" +
-                ocrHint +
-                "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
-                "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
-                "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
-                "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
-                "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
-                "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
-                "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
-                "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
-                "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
-                "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
-                "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
-                "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
-                "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
-                "Be strict. Mark as true if there is any doubt about appropriateness."
-            },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:${mimeType};base64,${base64Image}`
-              }
+    // 검열 요청 - OpenAI 호환 메시지 형식 (Workers AI qwen3.8-27b)
+    const messages = [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text:
+              "Analyze this image for inappropriate content. Be extremely strict and thorough. " +
+              "Look for any attempts to bypass detection through noise, partial covering, artistic filters, or text obfuscation. " +
+              "Also analyze any visible text in the image for inappropriate language, including leetspeak, symbols replacing letters, or intentional misspellings.\n\n" +
+              ocrHint +
+              "Rate each category as true (inappropriate) or false (appropriate). Only respond with the number and true/false on each line:\n\n" +
+              "1. Nudity/Sexual content (exposed genitals, sexual acts, suggestive poses): true/false\n" +
+              "2. Partial nudity/Suggestive content (underwear focus, sexual implications, provocative clothing): true/false\n" +
+              "3. Violence/Weapons (guns, knives, violence depiction, weapons display): true/false\n" +
+              "4. Graphic violence/Gore (blood, injuries, death, extreme violence): true/false\n" +
+              "5. Drugs/Alcohol abuse (drug paraphernalia, excessive drinking, drug use): true/false\n" +
+              "6. Hate speech/Offensive language (slurs, hate symbols, discriminatory text): true/false\n" +
+              "7. Harassment/Bullying content (targeting individuals, cyberbullying, intimidation): true/false\n" +
+              "8. Self-harm/Suicide content (cutting, suicide methods, self-injury): true/false\n" +
+              "9. Illegal activities (theft, fraud, illegal substances, criminal acts): true/false\n" +
+              "10. Spam/Scam content (fake offers, phishing, misleading information): true/false\n" +
+              "11. Child exploitation (minors in inappropriate contexts, child endangerment): true/false\n" +
+              "12. Extremist content (terrorist symbols, radical ideologies, dangerous groups): true/false\n\n" +
+              "Be strict. Mark as true if there is any doubt about appropriateness."
+          },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:${mimeType};base64,${base64Image}`
             }
-          ]
-        }
-      ],
-      // MiniMax-M3: thinking 명시 + 응답 잘림 방지용 토큰 상한
-      thinking: { type: 'adaptive' },
-      max_completion_tokens: 8192
-    };
+          }
+        ]
+      }
+    ];
 
-    console.log(`[이미지 검열 API 요청] URL: https://api.minimax.io/v1/chat/completions`);
-    console.log(`[이미지 검열 API 요청] 모델: ${requestBody.model}`);
+    console.log(`[이미지 검열 API 요청] Workers AI 모델: @cf/qwen/qwen3.8-27b`);
     console.log(`[이미지 검열 API 요청] 이미지 타입: ${mimeType}`);
-    console.log(`[이미지 검열 API 요청] Base64 이미지 URL 길이: ${requestBody.messages[0].content[1].image_url.url.length} 문자`);
+    console.log(`[이미지 검열 API 요청] Base64 이미지 URL 길이: ${messages[0].content[1].image_url.url.length} 문자`);
 
-    const analysis = await callQwenAPI(dashscopeApiKey, requestBody);
+    const analysis = await callWorkersAiVision(env, messages, 8192);
     if (!analysis.success) {
       throw new Error(analysis.error);
     }
@@ -446,6 +439,60 @@ function stripThinkBlocks(text) {
     cleaned = cleaned.slice(0, openIdx);
   }
   return cleaned.trim();
+}
+
+/**
+ * Workers AI 비전 모델(qwen3.8-27b) 호출 함수
+ * callQwenAPI와 동일한 반환 형태를 유지해 파싱/fail-closed 로직을 그대로 재사용한다.
+ * (inputSensitive/outputSensitive는 MiniMax 전용 필드라 항상 false)
+ * @param {Object} env - 환경 변수 (Workers AI 바인딩 env.AI)
+ * @param {Array} messages - OpenAI 호환 메시지 배열
+ * @param {number} maxTokens - 최대 생성 토큰 수
+ * @returns {Object} - { success, text?, inputSensitive, outputSensitive, error? }
+ */
+async function callWorkersAiVision(env, messages, maxTokens) {
+  let retryCount = 0;
+  const maxRetries = 3, retryDelay = 2000;
+  while (retryCount < maxRetries) {
+    try {
+      console.log(`[Workers AI 검열 호출] 시도 ${retryCount + 1}/${maxRetries}`);
+      const data = await env.AI.run('@cf/qwen/qwen3.8-27b', {
+        messages,
+        max_completion_tokens: maxTokens
+      });
+
+      const rawText = data?.choices?.[0]?.message?.content;
+      if (!rawText) {
+        console.log('[Workers AI 검열 응답 구조 오류]', {
+          hasChoices: !!data?.choices,
+          responseKeys: Object.keys(data || {})
+        });
+        return { success: false, error: '검열 모델에서 유효한 응답을 받지 못했습니다.' };
+      }
+
+      // <think>...</think> 추론 블록을 제거하고 실제 답변만 사용
+      const responseText = stripThinkBlocks(rawText);
+      if (rawText.length !== responseText.length) {
+        console.log(`[Workers AI 검열] <think> 블록 제거됨: ${rawText.length}자 → ${responseText.length}자`);
+      }
+      if (!responseText) {
+        console.log('[Workers AI 검열 응답 파싱 실패] 빈 응답');
+        return { success: false, error: '검열 모델 응답에서 텍스트를 추출할 수 없습니다.' };
+      }
+
+      console.log(`[Workers AI 검열 성공] 응답 길이: ${responseText.length} 문자`);
+      return { success: true, text: responseText, inputSensitive: false, outputSensitive: false };
+    } catch (e) {
+      retryCount++;
+      console.log(`[Workers AI 검열 호출 오류] 재시도 ${retryCount}/${maxRetries}:`, e.message);
+      if (retryCount < maxRetries) {
+        await new Promise(r => setTimeout(r, retryDelay));
+      } else {
+        return { success: false, error: `API 호출 오류: ${e.message}` };
+      }
+    }
+  }
+  return { success: false, error: '최대 재시도 횟수 초과' };
 }
 
 /**
